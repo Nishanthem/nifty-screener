@@ -5,6 +5,8 @@
     python -m app.cli --top 5
     python -m app.cli --poll     # snapshot now (run 09:15-09:30 to fix the opening range)
     python -m app.cli --backtest # validate on ~60d of intraday history
+    python -m app.cli --side short   # force shorts (still gated on index below VWAP)
+    python -m app.cli --side auto    # default: longs if index > VWAP, shorts if below
 """
 
 from __future__ import annotations
@@ -15,10 +17,19 @@ import datetime as dt
 import pandas as pd
 
 from .data import YFinanceProvider, load_all
-from .signals import rank
+from .signals import rank, Score, LONG, SHORT
+from .wicks import long_wicks, describe, day_candles
 from . import backtest
 
 IST = pd.Timestamp.now(tz="Asia/Kolkata")
+
+
+def _print_pick(s: Score, wick_note: str) -> None:
+    tag = "BUY " if s.side == LONG else "SELL"
+    print(f"{tag} {s.ticker:<12} score={s.score:.2f}  px={s.price}  "
+          f"stop={s.stop}  target={s.target}  vwap={s.vwap}  orh={s.orh}  orl={s.orl}")
+    print(f"{'':<17} {s.components}")
+    print(f"{'':<17} wicks: {wick_note}")
 
 
 def main() -> None:
@@ -29,6 +40,8 @@ def main() -> None:
     ap.add_argument("--backtest", action="store_true")
     ap.add_argument("--live", action="store_true", help="use live NSE data")
     ap.add_argument("--poll", action="store_true", help="persist a live snapshot and exit")
+    ap.add_argument("--side", choices=["auto", LONG, SHORT], default="auto",
+                    help="auto follows the index: longs above VWAP, shorts below")
     args = ap.parse_args()
 
     if args.poll:
@@ -38,16 +51,15 @@ def main() -> None:
         return
 
     if args.live:
-        from .live_score import rank_live
-        picks, bullish = rank_live()
-        if not bullish:
-            print("Index below its VWAP — no long today (gate).")
+        from .live_score import rank_live, live_wicks
+        picks, side = rank_live(side=args.side)
+        if not picks:
+            where = "below" if side == SHORT else "above"
+            print(f"Index {where} its VWAP — no {args.side} today (gate).")
             return
-        print(f"LIVE — top {args.top} intraday candidates ({IST:%Y-%m-%d %H:%M} IST)\n")
+        print(f"LIVE — top {args.top} intraday {side.upper()} candidates ({IST:%Y-%m-%d %H:%M} IST)\n")
         for s in picks[: args.top]:
-            print(f"{s.ticker:<14} score={s.score:.2f}  px={s.price}  "
-                  f"stop={s.stop}  target={s.target}  vwap={s.vwap}  orh={s.orh}")
-            print(f"{'':<14} {s.components}")
+            _print_pick(s, describe(live_wicks(s.ticker)))
         return
 
     provider = YFinanceProvider()
@@ -55,23 +67,23 @@ def main() -> None:
 
     if args.backtest:
         universe = load_all(provider)
-        df = backtest.run(universe, index_bars)
+        df = backtest.run(universe, index_bars, side=args.side)
         print(backtest.summarize(df))
         print(df.tail(15).to_string(index=False))
         return
 
     date = pd.Timestamp(args.date, tz="Asia/Kolkata") if args.date else IST.normalize()
     universe = load_all(provider)
-    picks = rank(universe, date, index_bars, decision_time=args.time)
+    picks = rank(universe, date, index_bars, decision_time=args.time, side=args.side)
 
     if not picks:
-        print("No candidates passed filters today.")
+        print(f"No {args.side} candidates passed filters today (index gate or no data).")
         return
-    print(f"Top {args.top} intraday candidates — {date.date()} @ {args.time} IST\n")
+    side = picks[0].side
+    print(f"Top {args.top} intraday {side.upper()} candidates — {date.date()} @ {args.time} IST (delayed data)\n")
     for s in picks[: args.top]:
-        print(f"{s.ticker:<14} score={s.score:.2f}  px={s.price}  "
-              f"stop={s.stop}  target={s.target}  vwap={s.vwap}  orh={s.orh}")
-        print(f"{'':<14} {s.components}")
+        bars = day_candles(universe[s.ticker].intraday, date)
+        _print_pick(s, describe(long_wicks(bars)))
 
 
 if __name__ == "__main__":

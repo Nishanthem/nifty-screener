@@ -1,7 +1,8 @@
 # Nifty Intraday Screener
 
-Daily Nifty 50 screener that suggests the best intraday long candidate,
-with entry, stop, and target. Two data paths: **live NSE** (real-time) and
+Daily Nifty 50 screener that suggests the best intraday candidate — long
+when the index is above its VWAP, short when below — with entry, stop, and
+target, plus a long-wick (tail) check on the first three 15-min candles. Two data paths: **live NSE** (real-time) and
 yfinance (~15 min delayed, used for backtesting and daily ATR/volume context).
 
 ## Usage
@@ -11,8 +12,10 @@ pip install -r requirements.txt
 playwright install chromium        # only needed for the live path
 
 python -m app.cli --live           # LIVE pick, real-time NSE prices
-python -m app.cli --poll           # save a live snapshot (run 09:15-09:30)
-./run_day.sh                       # full routine: poll open range, pick at 10:00
+python -m app.cli --poll           # save a live snapshot (run 09:15-10:00)
+./run_day.sh                       # full routine: poll 09:15-10:00, pick at 10:00
+SIDE=short ./run_day.sh            # force a side (still gated on the index)
+python -m app.cli --side short     # same for the CLI (auto | long | short)
 
 python -m app.cli                  # delayed yfinance path
 python -m app.cli --date 2026-09-11
@@ -24,7 +27,7 @@ uvicorn app.web:app --port 8123    # web UI at http://localhost:8123
 Cron (IST server), polling the opening range then picking at 10:00:
 
 ```
-15-30 9  * * 1-5 cd /path/to/nifty-screener && python3 -m app.cli --poll
+15-59 9  * * 1-5 cd /path/to/nifty-screener && python3 -m app.cli --poll
 0     10 * * 1-5 cd /path/to/nifty-screener && python3 -m app.cli --live --top 3
 ```
 
@@ -47,13 +50,22 @@ interface, just implement the provider methods in `app/data.py`.
 
 At the decision time (default 10:00 IST, after opening noise):
 
-1. **Index gate** — no pick unless Nifty itself trades above its VWAP.
-   Backtest showed longs only had positive expectancy on such days.
+1. **Index gate / side** — Nifty above its VWAP → look for longs only;
+   below → shorts only (`--side auto`, the default). Backtest showed longs
+   only had positive expectancy on bullish-index days, and vice versa.
 2. Per stock, a weighted score of: gap continuation (0.3–3% ideal),
    opening-range breakout (price > first-15m high), above-VWAP,
    momentum since open, relative volume. ATR% must be 0.8–6%.
-3. Entry at decision price, stop below min(OR-high, VWAP), target 1.5R,
-   square off 15:15.
+   Shorts use the exact mirror: gap-down, break *below* the first-15m low,
+   below VWAP, negative momentum.
+3. Entry at decision price, stop beyond min(OR-high, VWAP) for longs /
+   max(OR-low, VWAP) for shorts, target 1.5R, square off 15:15.
+4. **Wick check** — each pick reports long tails in the 09:15/09:30/09:45
+   candles (wick ≥ 2× body and ≥ 50% of range). A long upper wick means
+   buyers were rejected at highs (caution on longs); a long lower wick means
+   sellers were absorbed (caution on shorts). Live candles are rebuilt from
+   the 1/min snapshot poll, so they're approximate; the delayed path uses
+   yfinance 15m bars.
 
 ## Backtest result (60 days, yfinance 15m, no costs)
 
@@ -63,6 +75,14 @@ At the decision time (default 10:00 IST, after opening noise):
 | hit rate | 48% |
 | expectancy | +0.21R/trade |
 | index same window | −0.04%/day |
+
+Short side, same window and logic mirrored (re-run Sep 2026, 60d):
+
+| side | trades | hit | expectancy |
+|---|---|---|---|
+| long only | 22 | 45% | +0.20R |
+| short only | 36 | 58% | +0.23R |
+| auto (follow index) | 58 | 53% | +0.22R |
 
 Parameter sweep on the same 60d window (why 15m/10:00):
 

@@ -9,7 +9,9 @@ score each Nifty 50 stock on four well-studied intraday edges:
   4. Relative volume    — abnormal participation validates the move
 
 Plus filters: ATR% in a tradable band, and an index-trend gate so we don't
-fight a falling market. Long-only in v1.
+fight the market: longs only when the index is above its VWAP, shorts only
+when it is below. Short scoring is the exact mirror of long scoring
+(gap-down continuation, opening-range-low breakdown, below VWAP, negative ROC).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ OPEN_RANGE_MIN = 15
 ATR_WINDOW = 14
 MIN_ATR_PCT = 0.008
 MAX_ATR_PCT = 0.06
+LONG, SHORT = "long", "short"
 
 
 @dataclass
@@ -36,6 +39,8 @@ class Score:
     orh: float  # opening range high
     stop: float
     target: float
+    side: str = LONG
+    orl: float = float("nan")  # opening range low
 
 
 def _vwap(bars: pd.DataFrame) -> pd.Series:
@@ -57,8 +62,49 @@ def _clip01(x: float, lo: float, hi: float) -> float:
     return float(np.clip((x - lo) / (hi - lo), 0.0, 1.0))
 
 
+def composite(side: str, gap_pct: float, last: float, orh: float, orl: float,
+              vwap: float, roc: float, rel_vol: float, atr_pct: float) -> tuple[float, dict, float]:
+    """Shared long/short scoring. Returns (score, components, risk-per-share).
+
+    For shorts every directional input is mirrored: a gap *down* continues,
+    a break *below* the opening-range low shows intent, price *below* VWAP
+    means sellers are in control, and negative ROC is momentum.
+    """
+    sgn = 1.0 if side == LONG else -1.0
+    d_gap, d_roc = sgn * gap_pct, sgn * roc
+    level = orh if side == LONG else orl          # breakout level
+    beyond = sgn * (last - level) > 0
+    near = _clip01(sgn * (last / level - 1.0), -0.01, 0.0)
+    beyond_vwap = sgn * (last - vwap) > 0
+    near_vwap = _clip01(sgn * (last / vwap - 1.0), -0.005, 0.0)
+
+    c_gap = _clip01(d_gap, 0.003, 0.03) - _clip01(d_gap, 0.05, 0.10) * 0.5
+    c_orb = 1.0 if beyond else 0.4 * near
+    c_vwap = 1.0 if beyond_vwap else 0.3 * near_vwap
+    c_roc = _clip01(d_roc, 0.0, 0.02)
+    c_vol = _clip01(rel_vol, 0.05, 0.30)
+    score = 0.25 * c_gap + 0.25 * c_orb + 0.20 * c_vwap + 0.15 * c_roc + 0.15 * c_vol
+
+    if side == LONG:
+        risk = max(last - min(orh, vwap), last * atr_pct * 0.5)
+    else:
+        risk = max(max(orl, vwap) - last, last * atr_pct * 0.5)
+    comps = {"gap_pct": round(gap_pct * 100, 2), "orb": round(c_orb, 2),
+             "vwap_above": bool(last > vwap), "roc_pct": round(roc * 100, 2),
+             "rel_vol": round(rel_vol, 2), "atr_pct": round(atr_pct * 100, 2)}
+    return score, comps, risk
+
+
+def levels(side: str, last: float, risk: float) -> tuple[float, float]:
+    """(stop, target) at 1.5R on the trade's side."""
+    if side == LONG:
+        return round(last - risk, 2), round(last + 1.5 * risk, 2)
+    return round(last + risk, 2), round(last - 1.5 * risk, 2)
+
+
 def score_stock(intraday: pd.DataFrame, daily: pd.DataFrame, date: pd.Timestamp,
-                decision_time: str = DECISION_TIME, or_minutes: int = OPEN_RANGE_MIN) -> Score | None:
+                decision_time: str = DECISION_TIME, or_minutes: int = OPEN_RANGE_MIN,
+                side: str = LONG) -> Score | None:
     day = intraday[intraday.index.date == date.date()]
     upto = day[day.index <= pd.Timestamp(f"{date.date()} {decision_time}", tz=day.index.tz)]
     if len(upto) < 2 or daily.empty:
@@ -73,53 +119,53 @@ def score_stock(intraday: pd.DataFrame, daily: pd.DataFrame, date: pd.Timestamp,
         return None
 
     gap_pct = (open_ - prev_close) / prev_close
-    orh = float(day[day.index <= day.index[0] + pd.Timedelta(minutes=or_minutes)]["High"].max())
+    orng = day[day.index <= day.index[0] + pd.Timedelta(minutes=or_minutes)]
+    orh, orl = float(orng["High"].max()), float(orng["Low"].min())
     vwap = float(_vwap(upto).iloc[-1])
     roc = (close - open_) / open_
     avg_vol = float(daily["Volume"].tail(20).mean())
     rel_vol = float(upto["Volume"].sum() / max(avg_vol, 1))  # share of a full day's volume
 
-    c_gap = _clip01(gap_pct, 0.003, 0.03) - _clip01(gap_pct, 0.05, 0.10) * 0.5
-    c_orb = 1.0 if close > orh else 0.4 * _clip01(close / orh, 0.99, 1.0)
-    c_vwap = 1.0 if close > vwap else 0.3 * _clip01(close / vwap, 0.995, 1.0)
-    c_roc = _clip01(roc, 0.0, 0.02)
-    c_vol = _clip01(rel_vol, 0.05, 0.30)
-
-    score = 0.25 * c_gap + 0.25 * c_orb + 0.20 * c_vwap + 0.15 * c_roc + 0.15 * c_vol
-
-    risk = max(close - min(orh, vwap), close * atr_pct * 0.5)
-    stop = close - risk
-    target = close + 1.5 * risk
-
+    score, comps, risk = composite(side, gap_pct, close, orh, orl, vwap, roc, rel_vol, atr_pct)
+    stop, target = levels(side, close, risk)
     return Score(
-        ticker="", score=round(score, 4),
-        components={"gap_pct": round(gap_pct * 100, 2), "orb": c_orb, "vwap_above": bool(close > vwap),
-                    "roc_pct": round(roc * 100, 2), "rel_vol": round(rel_vol, 2),
-                    "atr_pct": round(atr_pct * 100, 2)},
-        price=round(close, 2), vwap=round(vwap, 2), orh=round(orh, 2),
-        stop=round(stop, 2), target=round(target, 2),
+        ticker="", score=round(score, 4), components=comps,
+        price=round(close, 2), vwap=round(vwap, 2), orh=round(orh, 2), orl=round(orl, 2),
+        stop=stop, target=target, side=side,
     )
 
 
-def index_bullish(index_bars: pd.DataFrame, date: pd.Timestamp, decision_time: str = DECISION_TIME) -> bool:
+def index_side(index_bars: pd.DataFrame, date: pd.Timestamp,
+               decision_time: str = DECISION_TIME) -> str | None:
+    """LONG if the index is above its VWAP, SHORT if below, None if no data."""
     day = index_bars[index_bars.index.date == date.date()]
     upto = day[day.index <= pd.Timestamp(f"{date.date()} {decision_time}", tz=day.index.tz)]
     if len(upto) < 2:
-        return True  # no data → don't gate
-    return float(upto["Close"].iloc[-1]) > float(_vwap(upto).iloc[-1])
+        return None
+    return LONG if float(upto["Close"].iloc[-1]) > float(_vwap(upto).iloc[-1]) else SHORT
+
+
+def index_bullish(index_bars: pd.DataFrame, date: pd.Timestamp, decision_time: str = DECISION_TIME) -> bool:
+    return index_side(index_bars, date, decision_time) != SHORT
 
 
 def rank(universe: dict, date: pd.Timestamp, index_bars: pd.DataFrame | None = None,
          decision_time: str = DECISION_TIME, require_bullish_index: bool = True,
-         or_minutes: int = OPEN_RANGE_MIN) -> list[Score]:
-    # Hard gate: backtest showed longs only had positive expectancy on days the
-    # index traded above its own VWAP at decision time. No pick = valid output.
-    if index_bars is not None and require_bullish_index \
-            and not index_bullish(index_bars, date, decision_time):
+         or_minutes: int = OPEN_RANGE_MIN, side: str = LONG) -> list[Score]:
+    """Ranked picks for `side` (LONG / SHORT / "auto").
+
+    Hard gate: longs only on days the index trades above its own VWAP at
+    decision time, shorts only below it. "auto" picks the side from the index.
+    No pick = valid output.
+    """
+    idx = index_side(index_bars, date, decision_time) if index_bars is not None else None
+    if side == "auto":
+        side = idx or LONG
+    elif require_bullish_index and idx is not None and idx != side:
         return []
     out = []
     for t, bars in universe.items():
-        s = score_stock(bars.intraday, bars.daily, date, decision_time, or_minutes)
+        s = score_stock(bars.intraday, bars.daily, date, decision_time, or_minutes, side)
         if s is None:
             continue
         s.ticker = t

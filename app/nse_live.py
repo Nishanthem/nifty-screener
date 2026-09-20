@@ -21,6 +21,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 CDP_URL = "http://localhost:29229"
@@ -105,11 +106,58 @@ def load_snapshots(date: pd.Timestamp) -> pd.DataFrame:
     return df.dropna(subset=["ts"])
 
 
-def opening_range_high(date: pd.Timestamp, symbol: str, minutes: int = 15) -> float | None:
-    """Highest observed price in the first `minutes` of the session."""
+def _early(date: pd.Timestamp, symbol: str, minutes: int) -> pd.DataFrame:
     df = load_snapshots(date)
     if df.empty:
-        return None
-    cutoff = pd.Timestamp(f"{date.date()} 09:{15 + minutes:02d}", tz=IST)
-    early = df[(df["symbol"] == symbol) & (df["ts"] <= cutoff)]
+        return df
+    start = pd.Timestamp(f"{date.date()} 09:15", tz=IST)
+    cutoff = start + pd.Timedelta(minutes=minutes)
+    return df[(df["symbol"] == symbol) & (df["ts"] >= start) & (df["ts"] <= cutoff)]
+
+
+def opening_range_high(date: pd.Timestamp, symbol: str, minutes: int = 15) -> float | None:
+    """Highest observed price in the first `minutes` of the session."""
+    early = _early(date, symbol, minutes)
     return float(early["high"].max()) if not early.empty else None
+
+
+def opening_range_low(date: pd.Timestamp, symbol: str, minutes: int = 15) -> float | None:
+    """Lowest observed price in the first `minutes` of the session."""
+    early = _early(date, symbol, minutes)
+    return float(early["low"].min()) if not early.empty else None
+
+
+def candles_from_snapshots(date: pd.Timestamp, symbol: str, minutes: int = 15) -> pd.DataFrame:
+    """Approximate OHLC bars for `symbol` from the polled snapshot log.
+
+    Open/close are the first/last observed LTP in each bucket. High/low are
+    the extreme LTPs, extended by any new day-high/day-low printed during
+    the bucket (a rising dayHigh means the print happened in that bucket).
+    With ~1/min polling this is a fair proxy, not exchange bars.
+    """
+    df = load_snapshots(date)
+    if df.empty:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+    start = pd.Timestamp(f"{date.date()} 09:15", tz=IST)
+    d = df[(df["symbol"] == symbol) & (df["ts"] >= start)].sort_values("ts")
+    d = d.drop_duplicates("ts")
+    if d.empty:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+    new_high = d["high"].where(d["high"] > d["high"].shift().ffill().fillna(-np.inf))
+    new_low = d["low"].where(d["low"] < d["low"].shift().ffill().fillna(np.inf))
+    hi = pd.concat([d["last"], new_high], axis=1).max(axis=1)
+    lo = pd.concat([d["last"], new_low], axis=1).min(axis=1)
+    bucket = d["ts"].dt.floor(f"{minutes}min")
+    out = pd.DataFrame({
+        "Open": d["last"].groupby(bucket).first(),
+        "High": hi.groupby(bucket).max(),
+        "Low": lo.groupby(bucket).min(),
+        "Close": d["last"].groupby(bucket).last(),
+        "n": d["last"].groupby(bucket).size(),
+    })
+    # Only buckets that are complete (polling ran past their end) and have
+    # enough observations to be a meaningful candle.
+    last_ts = d["ts"].max()
+    complete = (out.index + pd.Timedelta(minutes=minutes)) <= last_ts + pd.Timedelta(minutes=2)
+    out = out[complete & (out["n"] >= 3)]
+    return out.drop(columns="n")
