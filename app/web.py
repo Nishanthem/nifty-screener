@@ -7,7 +7,8 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from .data import YFinanceProvider, load_all
-from .signals import rank
+from .signals import rank, LONG
+from .wicks import long_wicks, describe, day_candles
 from . import backtest
 
 app = FastAPI(title="Nifty Intraday Screener")
@@ -20,34 +21,36 @@ th{background:#f4f4f4}.pick{background:#e8f7e8}.meta{color:#666;font-size:.9em}<
 </head><body>{{body}}</body></html>"""
 
 
-def _table(picks) -> str:
+def _table(picks, wicks: dict[str, str]) -> str:
     rows = "".join(
-        f"<tr class='{'pick' if i == 0 else ''}'><td>{s.ticker}</td><td>{s.score:.2f}</td>"
+        f"<tr class='{'pick' if i == 0 else ''}'><td>{'BUY' if s.side == LONG else 'SELL'}</td>"
+        f"<td>{s.ticker}</td><td>{s.score:.2f}</td>"
         f"<td>{s.price}</td><td>{s.stop}</td><td>{s.target}</td>"
         f"<td>{s.components['gap_pct']}%</td><td>{s.components['rel_vol']}</td>"
-        f"<td>{'yes' if s.components['vwap_above'] else 'no'}</td></tr>"
+        f"<td>{'yes' if s.components['vwap_above'] else 'no'}</td><td>{wicks.get(s.ticker, '')}</td></tr>"
         for i, s in enumerate(picks)
     )
-    return ("<table><tr><th>Stock</th><th>Score</th><th>Price</th><th>Stop</th>"
-            "<th>Target</th><th>Gap</th><th>RelVol</th><th>&gt;VWAP</th></tr>"
+    return ("<table><tr><th>Side</th><th>Stock</th><th>Score</th><th>Price</th><th>Stop</th>"
+            "<th>Target</th><th>Gap</th><th>RelVol</th><th>&gt;VWAP</th><th>Wicks (first 3 x 15m)</th></tr>"
             f"{rows}</table>")
 
 
 @app.get("/", response_class=HTMLResponse)
-def today(top: int = 5, time: str = "10:00"):
+def today(top: int = 5, time: str = "10:00", side: str = "auto"):
     index_bars = _provider.index_intraday()
     universe = load_all(_provider)
     date = pd.Timestamp.now(tz="Asia/Kolkata").normalize()
-    picks = rank(universe, date, index_bars, decision_time=time)
+    picks = rank(universe, date, index_bars, decision_time=time, side=side)[:top]
+    wicks = {s.ticker: describe(long_wicks(day_candles(universe[s.ticker].intraday, date))) for s in picks}
     body = (f"<h1>Nifty 50 Intraday — {date.date()}</h1>"
-            f"<p class='meta'>Decision time {time} IST · delayed data · long-only · "
+            f"<p class='meta'>Decision time {time} IST · delayed data · side={side} · "
             f"not investment advice</p>")
-    body += _table(picks[:top]) if picks else "<p>No candidates passed filters.</p>"
+    body += _table(picks, wicks) if picks else "<p>No candidates passed filters (index gate).</p>"
     return PAGE.replace("{{body}}", body)
 
 
 @app.get("/backtest")
-def bt():
+def bt(side: str = LONG):
     index_bars = _provider.index_intraday()
     universe = load_all(_provider)
-    return backtest.summarize(backtest.run(universe, index_bars))
+    return backtest.summarize(backtest.run(universe, index_bars, side=side))

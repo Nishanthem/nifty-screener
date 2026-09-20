@@ -12,13 +12,16 @@ import pandas as pd
 
 from .constituents import NIFTY50
 from .data import YFinanceProvider
-from .nse_live import fetch_snapshots, persist, opening_range_high, Snapshot
-from .signals import (Score, _atr_pct, _clip01, MIN_ATR_PCT, MAX_ATR_PCT)
+from .nse_live import (fetch_snapshots, persist, opening_range_high, opening_range_low,
+                       candles_from_snapshots, Snapshot)
+from .signals import (Score, _atr_pct, composite, levels, MIN_ATR_PCT, MAX_ATR_PCT, LONG, SHORT)
+from .wicks import long_wicks, Wick
 
 INDEX_SYMBOL = "NIFTY 50"
 
 
-def _score_snapshot(s: Snapshot, daily: pd.DataFrame, orh: float | None) -> Score | None:
+def _score_snapshot(s: Snapshot, daily: pd.DataFrame, orh: float | None, orl: float | None,
+                    side: str = LONG) -> Score | None:
     if daily.empty:
         return None
     atr_pct = _atr_pct(daily)
@@ -29,40 +32,38 @@ def _score_snapshot(s: Snapshot, daily: pd.DataFrame, orh: float | None) -> Scor
     roc = (s.last - s.open) / s.open
     avg_vol = float(daily["Volume"].tail(20).mean())
     rel_vol = s.volume / max(avg_vol, 1)
-    # Without polled opening-range data, fall back to the day high as a proxy.
+    # Without polled opening-range data, fall back to the day high/low as a proxy.
+    polled = orh is not None and orl is not None
     orh_eff = orh if orh is not None else s.high
+    orl_eff = orl if orl is not None else s.low
 
-    c_gap = _clip01(gap_pct, 0.003, 0.03) - _clip01(gap_pct, 0.05, 0.10) * 0.5
-    c_orb = 1.0 if s.last > orh_eff else 0.4 * _clip01(s.last / orh_eff, 0.99, 1.0)
-    c_vwap = 1.0 if s.last > s.vwap else 0.3 * _clip01(s.last / s.vwap, 0.995, 1.0)
-    c_roc = _clip01(roc, 0.0, 0.02)
-    c_vol = _clip01(rel_vol, 0.05, 0.30)
-
-    score = 0.25 * c_gap + 0.25 * c_orb + 0.20 * c_vwap + 0.15 * c_roc + 0.15 * c_vol
-    risk = max(s.last - min(orh_eff, s.vwap), s.last * atr_pct * 0.5)
-
+    score, comps, risk = composite(side, gap_pct, s.last, orh_eff, orl_eff, s.vwap, roc, rel_vol, atr_pct)
+    comps["or_source"] = "polled" if polled else "day_range"
+    stop, target = levels(side, s.last, risk)
     return Score(
-        ticker=s.symbol, score=round(score, 4),
-        components={"gap_pct": round(gap_pct * 100, 2), "orb": round(c_orb, 2),
-                    "vwap_above": bool(s.last > s.vwap), "roc_pct": round(roc * 100, 2),
-                    "rel_vol": round(rel_vol, 2), "atr_pct": round(atr_pct * 100, 2),
-                    "orh_source": "polled" if orh is not None else "day_high"},
-        price=round(s.last, 2), vwap=round(s.vwap, 2), orh=round(orh_eff, 2),
-        stop=round(s.last - risk, 2), target=round(s.last + 1.5 * risk, 2),
+        ticker=s.symbol, score=round(score, 4), components=comps,
+        price=round(s.last, 2), vwap=round(s.vwap, 2), orh=round(orh_eff, 2), orl=round(orl_eff, 2),
+        stop=stop, target=target, side=side,
     )
 
 
-def rank_live(save: bool = True) -> tuple[list[Score], bool]:
-    """Returns (ranked picks, index_bullish). Empty list when the index gate fails."""
+def rank_live(save: bool = True, side: str = "auto") -> tuple[list[Score], str]:
+    """Returns (ranked picks, side traded).
+
+    `side` is LONG, SHORT or "auto" (follow the index: above VWAP -> longs,
+    below -> shorts). Forcing a side against the index gate returns [].
+    """
     snaps = fetch_snapshots()
     if save:
         persist(snaps)
 
     by_sym = {s.symbol: s for s in snaps}
     index = by_sym.get(INDEX_SYMBOL)
-    bullish = True if index is None else index.last > index.vwap
-    if not bullish:
-        return [], False
+    idx_side = None if index is None else (LONG if index.last > index.vwap else SHORT)
+    if side == "auto":
+        side = idx_side or LONG
+    elif idx_side is not None and idx_side != side:
+        return [], idx_side
 
     provider = YFinanceProvider()
     today = pd.Timestamp.now(tz="Asia/Kolkata")
@@ -71,7 +72,14 @@ def rank_live(save: bool = True) -> tuple[list[Score], bool]:
         s = by_sym.get(t)
         if s is None:
             continue
-        sc = _score_snapshot(s, provider.daily(t), opening_range_high(today, t))
+        sc = _score_snapshot(s, provider.daily(t), opening_range_high(today, t),
+                             opening_range_low(today, t), side)
         if sc is not None:
             out.append(sc)
-    return sorted(out, key=lambda x: x.score, reverse=True), True
+    return sorted(out, key=lambda x: x.score, reverse=True), side
+
+
+def live_wicks(symbol: str, date: pd.Timestamp | None = None) -> list[Wick]:
+    """Long wicks in the first three 15-min candles, built from today's polled snapshots."""
+    date = date or pd.Timestamp.now(tz="Asia/Kolkata")
+    return long_wicks(candles_from_snapshots(date, symbol))

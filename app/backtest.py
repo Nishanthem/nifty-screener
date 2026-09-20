@@ -12,16 +12,16 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .signals import rank, DECISION_TIME
+from .signals import rank, DECISION_TIME, LONG
 
 EXIT_TIME = "15:15"
 
 
 def simulate_day(universe: dict, index_bars: pd.DataFrame, date: pd.Timestamp,
                  decision_time: str = DECISION_TIME, or_minutes: int | None = None,
-                 top_n: int = 1) -> dict | None:
+                 top_n: int = 1, side: str = LONG) -> dict | None:
     kwargs = {} if or_minutes is None else {"or_minutes": or_minutes}
-    picks = rank(universe, date, index_bars, decision_time=decision_time, **kwargs)
+    picks = rank(universe, date, index_bars, decision_time=decision_time, side=side, **kwargs)
     if not picks:
         return None
     top = picks[0]
@@ -32,18 +32,22 @@ def simulate_day(universe: dict, index_bars: pd.DataFrame, date: pd.Timestamp,
     if after.empty:
         return None
 
+    sgn = 1.0 if top.side == LONG else -1.0
     entry = top.price
-    risk = entry - top.stop
+    risk = abs(entry - top.stop)
     exit_px = float(after["Close"].iloc[-1])
     hit = "eod"
     for _, bar in after.iterrows():
-        if bar["Low"] <= top.stop:
+        # stop checked first (conservative when both are touched in one bar)
+        stopped = bar["Low"] <= top.stop if sgn > 0 else bar["High"] >= top.stop
+        if stopped:
             exit_px, hit = top.stop, "stop"
             break
-        if bar["High"] >= top.target:
+        hit_target = bar["High"] >= top.target if sgn > 0 else bar["Low"] <= top.target
+        if hit_target:
             exit_px, hit = top.target, "target"
             break
-    r = (exit_px - entry) / max(risk, 1e-9)
+    r = sgn * (exit_px - entry) / max(risk, 1e-9)
 
     # index baseline: buy index at decision, exit 15:15
     idx_day = index_bars[index_bars.index.date == date.date()]
@@ -54,17 +58,18 @@ def simulate_day(universe: dict, index_bars: pd.DataFrame, date: pd.Timestamp,
         if len(idx_in) and len(idx_out):
             idx_ret = (float(idx_out["Close"].iloc[-1]) - float(idx_in["Close"].iloc[-1])) / float(idx_in["Close"].iloc[-1])
 
-    return {"date": str(date.date()), "pick": top.ticker, "score": top.score,
+    return {"date": str(date.date()), "side": top.side, "pick": top.ticker, "score": top.score,
             "entry": entry, "exit": round(exit_px, 2), "R": round(r, 2), "exit_type": hit,
             "index_pct": round(idx_ret * 100, 2)}
 
 
 def run(universe: dict, index_bars: pd.DataFrame,
-        decision_time: str = DECISION_TIME, or_minutes: int | None = None) -> pd.DataFrame:
+        decision_time: str = DECISION_TIME, or_minutes: int | None = None,
+        side: str = LONG) -> pd.DataFrame:
     dates = sorted({d.date() for d in index_bars.index})
     rows = [r for d in dates
             if (r := simulate_day(universe, index_bars, pd.Timestamp(d, tz=index_bars.index.tz),
-                                  decision_time, or_minutes))]
+                                  decision_time, or_minutes, side=side))]
     return pd.DataFrame(rows)
 
 
