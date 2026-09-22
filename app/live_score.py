@@ -93,6 +93,22 @@ def rank_live(save: bool = True, side: str = "auto",
     return sorted(out, key=lambda x: x.score, reverse=True), side
 
 
+def all_breakouts(date: pd.Timestamp | None = None) -> list[tuple[str, float, float, Breakout]]:
+    """Every Nifty 50 stock with a confirmed 5-min close outside its 15-min
+    opening range today, both directions, ignoring the index gate.
+    Returns (symbol, orh, orl, breakout) sorted by confirmation time."""
+    date = date or pd.Timestamp.now(tz="Asia/Kolkata")
+    out = []
+    for t in NIFTY50:
+        orh, orl = opening_range_high(date, t), opening_range_low(date, t)
+        if orh is None or orl is None:
+            continue
+        bo = scan_breakout(date, t, orh, orl)
+        if bo is not None:
+            out.append((t, orh, orl, bo))
+    return sorted(out, key=lambda x: (x[3].close_at, x[0]))
+
+
 def live_wicks(symbol: str, date: pd.Timestamp | None = None) -> list[Wick]:
     """Long wicks in the first three 15-min candles, built from today's polled snapshots."""
     date = date or pd.Timestamp.now(tz="Asia/Kolkata")

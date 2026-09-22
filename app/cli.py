@@ -5,6 +5,7 @@
     python -m app.cli --top 5
     python -m app.cli --poll     # snapshot now (run 09:15-09:45 to fix the opening range + 5m candles)
     python -m app.cli --live --scan  # only stocks whose 5m candle (09:35/40/45 close) broke the 15m OR
+    python -m app.cli --breakouts    # list every stock with a 5m close above/below its OR (no gate, no fetch)
     python -m app.cli --backtest # validate on ~60d of intraday history
     python -m app.cli --side short   # force shorts (still gated on index below VWAP)
     python -m app.cli --side auto    # default: longs if index > VWAP, shorts if below
@@ -43,6 +44,8 @@ def main() -> None:
     ap.add_argument("--poll", action="store_true", help="persist a live snapshot and exit")
     ap.add_argument("--scan", action="store_true",
                     help="live: require a 5-min candle close (09:35/09:40/09:45) beyond the 15-min opening range")
+    ap.add_argument("--breakouts", action="store_true",
+                    help="list all 5-min opening-range breakouts (both sides) from today's snapshots and exit")
     ap.add_argument("--side", choices=["auto", LONG, SHORT], default="auto",
                     help="auto follows the index: longs above VWAP, shorts below")
     args = ap.parse_args()
@@ -51,6 +54,15 @@ def main() -> None:
         from .nse_live import fetch_snapshots, persist
         snaps = fetch_snapshots()
         print(f"saved {len(snaps)} snapshots -> {persist(snaps)}")
+        return
+
+    if args.breakouts:
+        from .live_score import all_breakouts
+        rows = all_breakouts()
+        print(f"5m ORB breakouts vs 15m opening range ({IST:%Y-%m-%d %H:%M} IST): {len(rows)}")
+        for sym, orh, orl, b in rows:
+            arrow = "ABOVE" if b.side == LONG else "BELOW"
+            print(f"  {sym:<12} {arrow} OR  close={b.close} @ {b.close_at}  orh={orh}  orl={orl}")
         return
 
     if args.live:

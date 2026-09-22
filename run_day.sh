@@ -25,11 +25,15 @@ while :; do
   done
   if [ "$due" -ne 0 ]; then
     echo "--- 5m ORB scan @ ${due} IST (now $now) ---"
+    # every stock that closed a 5m candle above/below its OR (both sides), then the gated ranked picks
+    python3 -m app.cli --breakouts || true
     if [ "$due" -ge "$FINAL" ]; then
       python3 -m app.cli --live --scan --top 3 --side "$SIDE"
+      echo "=== SCAN ${due} DONE (final) ==="
       break
     fi
     python3 -m app.cli --live --scan --top 3 --side "$SIDE" || true
+    echo "=== SCAN ${due} DONE ==="
     last="$due"
   fi
   sleep 60
