@@ -27,8 +27,11 @@ while :; do
     echo "--- 5m ORB scan @ ${due} IST (now $now) ---"
     # every stock that closed a 5m candle above/below its OR (both sides), then the gated ranked picks
     python3 -m app.cli --breakouts || true
+    # yfinance-based list of the same breakouts (fallback when NSE blocks the live path)
+    python3 -m app.yf_orb || true
     if [ "$due" -ge "$FINAL" ]; then
-      python3 -m app.cli --live --scan --top 3 --side "$SIDE"
+      python3 -m app.cli --live --scan --top 3 --side "$SIDE" \
+        || python3 -m app.cli --top 3 --time 09:45 --side "$SIDE"
       echo "=== SCAN ${due} DONE (final) ==="
       break
     fi

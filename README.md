@@ -15,6 +15,7 @@ python -m app.cli --live           # LIVE pick, real-time NSE prices
 python -m app.cli --poll           # save a live snapshot (run 09:15-09:45)
 python -m app.cli --live --scan    # only stocks whose 5-min candle closed beyond the 15-min OR
 python -m app.cli --breakouts      # every stock with a 5-min close above/below its OR (both sides, from snapshots)
+python -m app.yf_orb            # same breakout list from yfinance 5-min bars (fallback when NSE blocks)
 ./run_day.sh                       # full routine: poll from 09:15, 5m ORB scans at 09:35/09:40/09:45
 SIDE=short ./run_day.sh            # force a side (still gated on the index)
 python -m app.cli --side short     # same for the CLI (auto | long | short)
