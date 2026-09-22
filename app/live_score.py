@@ -13,7 +13,7 @@ import pandas as pd
 from .constituents import NIFTY50
 from .data import YFinanceProvider
 from .nse_live import (fetch_snapshots, persist, opening_range_high, opening_range_low,
-                       candles_from_snapshots, Snapshot)
+                       candles_from_snapshots, scan_breakout, Snapshot, Breakout)
 from .signals import (Score, _atr_pct, composite, levels, MIN_ATR_PCT, MAX_ATR_PCT, LONG, SHORT)
 from .wicks import long_wicks, Wick
 
@@ -21,7 +21,8 @@ INDEX_SYMBOL = "NIFTY 50"
 
 
 def _score_snapshot(s: Snapshot, daily: pd.DataFrame, orh: float | None, orl: float | None,
-                    side: str = LONG) -> Score | None:
+                    side: str = LONG, breakout: Breakout | None = None,
+                    confirm_orb: bool = False) -> Score | None:
     if daily.empty:
         return None
     atr_pct = _atr_pct(daily)
@@ -37,8 +38,16 @@ def _score_snapshot(s: Snapshot, daily: pd.DataFrame, orh: float | None, orl: fl
     orh_eff = orh if orh is not None else s.high
     orl_eff = orl if orl is not None else s.low
 
-    score, comps, risk = composite(side, gap_pct, s.last, orh_eff, orl_eff, s.vwap, roc, rel_vol, atr_pct)
+    confirmed = None
+    if confirm_orb:
+        confirmed = breakout is not None and breakout.side == side
+        if not confirmed:
+            return None
+    score, comps, risk = composite(side, gap_pct, s.last, orh_eff, orl_eff, s.vwap, roc, rel_vol,
+                                   atr_pct, confirmed=confirmed)
     comps["or_source"] = "polled" if polled else "day_range"
+    if breakout is not None:
+        comps["orb_5m"] = f"{breakout.side} @ {breakout.close_at} close {breakout.close}"
     stop, target = levels(side, s.last, risk)
     return Score(
         ticker=s.symbol, score=round(score, 4), components=comps,
@@ -47,11 +56,15 @@ def _score_snapshot(s: Snapshot, daily: pd.DataFrame, orh: float | None, orl: fl
     )
 
 
-def rank_live(save: bool = True, side: str = "auto") -> tuple[list[Score], str]:
+def rank_live(save: bool = True, side: str = "auto",
+              confirm_orb: bool = False) -> tuple[list[Score], str]:
     """Returns (ranked picks, side traded).
 
     `side` is LONG, SHORT or "auto" (follow the index: above VWAP -> longs,
     below -> shorts). Forcing a side against the index gate returns [].
+
+    `confirm_orb` keeps only stocks where a 5-min candle closing at
+    09:35/09:40/09:45 closed beyond the 15-min opening range on the traded side.
     """
     snaps = fetch_snapshots()
     if save:
@@ -72,8 +85,9 @@ def rank_live(save: bool = True, side: str = "auto") -> tuple[list[Score], str]:
         s = by_sym.get(t)
         if s is None:
             continue
-        sc = _score_snapshot(s, provider.daily(t), opening_range_high(today, t),
-                             opening_range_low(today, t), side)
+        orh, orl = opening_range_high(today, t), opening_range_low(today, t)
+        bo = scan_breakout(today, t, orh, orl) if orh is not None and orl is not None else None
+        sc = _score_snapshot(s, provider.daily(t), orh, orl, side, bo, confirm_orb)
         if sc is not None:
             out.append(sc)
     return sorted(out, key=lambda x: x.score, reverse=True), side

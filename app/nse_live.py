@@ -161,3 +161,34 @@ def candles_from_snapshots(date: pd.Timestamp, symbol: str, minutes: int = 15) -
     complete = (out.index + pd.Timedelta(minutes=minutes)) <= last_ts + pd.Timedelta(minutes=2)
     out = out[complete & (out["n"] >= 3)]
     return out.drop(columns="n")
+
+
+SCAN_CANDLE_MIN = 5
+SCAN_CLOSES = ("09:35", "09:40", "09:45")   # 5-min candle closes checked against the OR
+
+
+@dataclass
+class Breakout:
+    side: str      # "long" (close > ORH) | "short" (close < ORL)
+    close_at: str  # HH:MM the confirming 5-min candle closed
+    close: float
+
+
+def scan_breakout(date: pd.Timestamp, symbol: str, orh: float, orl: float,
+                  closes: tuple[str, ...] = SCAN_CLOSES) -> Breakout | None:
+    """First 5-min candle (closing at one of `closes`) that closed outside the
+    15-min opening range: above ORH -> long, below ORL -> short."""
+    bars = candles_from_snapshots(date, symbol, minutes=SCAN_CANDLE_MIN)
+    if bars.empty:
+        return None
+    for hhmm in closes:
+        end = pd.Timestamp(f"{date.date()} {hhmm}", tz=IST)
+        start = end - pd.Timedelta(minutes=SCAN_CANDLE_MIN)
+        if start not in bars.index:
+            continue
+        c = float(bars.loc[start, "Close"])
+        if c > orh:
+            return Breakout("long", hhmm, round(c, 2))
+        if c < orl:
+            return Breakout("short", hhmm, round(c, 2))
+    return None

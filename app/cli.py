@@ -3,7 +3,8 @@
     python -m app.cli --live     # live NSE data (real-time, via browser session)
     python -m app.cli            # delayed yfinance data
     python -m app.cli --top 5
-    python -m app.cli --poll     # snapshot now (run 09:15-09:30 to fix the opening range)
+    python -m app.cli --poll     # snapshot now (run 09:15-09:45 to fix the opening range + 5m candles)
+    python -m app.cli --live --scan  # only stocks whose 5m candle (09:35/40/45 close) broke the 15m OR
     python -m app.cli --backtest # validate on ~60d of intraday history
     python -m app.cli --side short   # force shorts (still gated on index below VWAP)
     python -m app.cli --side auto    # default: longs if index > VWAP, shorts if below
@@ -40,6 +41,8 @@ def main() -> None:
     ap.add_argument("--backtest", action="store_true")
     ap.add_argument("--live", action="store_true", help="use live NSE data")
     ap.add_argument("--poll", action="store_true", help="persist a live snapshot and exit")
+    ap.add_argument("--scan", action="store_true",
+                    help="live: require a 5-min candle close (09:35/09:40/09:45) beyond the 15-min opening range")
     ap.add_argument("--side", choices=["auto", LONG, SHORT], default="auto",
                     help="auto follows the index: longs above VWAP, shorts below")
     args = ap.parse_args()
@@ -52,12 +55,18 @@ def main() -> None:
 
     if args.live:
         from .live_score import rank_live, live_wicks
-        picks, side = rank_live(side=args.side)
+        picks, side = rank_live(side=args.side, confirm_orb=args.scan)
         if not picks:
-            where = "below" if side == SHORT else "above"
-            print(f"Index {where} its VWAP — no {args.side} today (gate).")
+            if args.side != "auto" and side != args.side:
+                where = "below" if side == SHORT else "above"
+                print(f"Index {where} its VWAP — no {args.side} today (gate).")
+            elif args.scan:
+                print(f"No {side} 5-min ORB confirmation yet (index side={side}) at {IST:%H:%M} IST.")
+            else:
+                print(f"No {side} candidates passed filters today.")
             return
-        print(f"LIVE — top {args.top} intraday {side.upper()} candidates ({IST:%Y-%m-%d %H:%M} IST)\n")
+        mode = "5m ORB scan" if args.scan else "LIVE"
+        print(f"{mode} — top {args.top} intraday {side.upper()} candidates ({IST:%Y-%m-%d %H:%M} IST)\n")
         for s in picks[: args.top]:
             _print_pick(s, describe(live_wicks(s.ticker)))
         return
