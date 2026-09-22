@@ -63,17 +63,21 @@ def _clip01(x: float, lo: float, hi: float) -> float:
 
 
 def composite(side: str, gap_pct: float, last: float, orh: float, orl: float,
-              vwap: float, roc: float, rel_vol: float, atr_pct: float) -> tuple[float, dict, float]:
+              vwap: float, roc: float, rel_vol: float, atr_pct: float,
+              confirmed: bool | None = None) -> tuple[float, dict, float]:
     """Shared long/short scoring. Returns (score, components, risk-per-share).
 
     For shorts every directional input is mirrored: a gap *down* continues,
     a break *below* the opening-range low shows intent, price *below* VWAP
     means sellers are in control, and negative ROC is momentum.
+
+    `confirmed` overrides the breakout test when the caller has a candle-close
+    confirmation (e.g. a 5-min candle closed beyond the opening range).
     """
     sgn = 1.0 if side == LONG else -1.0
     d_gap, d_roc = sgn * gap_pct, sgn * roc
     level = orh if side == LONG else orl          # breakout level
-    beyond = sgn * (last - level) > 0
+    beyond = confirmed if confirmed is not None else sgn * (last - level) > 0
     near = _clip01(sgn * (last / level - 1.0), -0.01, 0.0)
     beyond_vwap = sgn * (last - vwap) > 0
     near_vwap = _clip01(sgn * (last / vwap - 1.0), -0.005, 0.0)
