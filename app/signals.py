@@ -139,14 +139,43 @@ def score_stock(intraday: pd.DataFrame, daily: pd.DataFrame, date: pd.Timestamp,
     )
 
 
-def index_side(index_bars: pd.DataFrame, date: pd.Timestamp,
-               decision_time: str = DECISION_TIME) -> str | None:
-    """LONG if the index is above its VWAP, SHORT if below, None if no data."""
+BOTH = "both"
+INDEX_GATE_PCT = 0.003   # index >= +0.3% vs prev close -> longs only; <= -0.3% -> shorts only
+
+
+def index_regime(change_pct: float) -> str:
+    """LONG / SHORT / BOTH from the index's change vs previous close (fraction)."""
+    if change_pct >= INDEX_GATE_PCT:
+        return LONG
+    if change_pct <= -INDEX_GATE_PCT:
+        return SHORT
+    return BOTH
+
+
+def sides_allowed(regime: str | None, side: str) -> list[str]:
+    """Sides to trade for a requested `side` (LONG / SHORT / "auto") under `regime`."""
+    if regime is None or regime == BOTH:
+        return [LONG, SHORT] if side == "auto" else [side]
+    return [regime] if side in ("auto", regime) else []
+
+
+def index_change(index_bars: pd.DataFrame, date: pd.Timestamp,
+                 decision_time: str = DECISION_TIME) -> float | None:
+    """Index change vs previous session close (fraction) at decision time, None if no data."""
     day = index_bars[index_bars.index.date == date.date()]
     upto = day[day.index <= pd.Timestamp(f"{date.date()} {decision_time}", tz=day.index.tz)]
-    if len(upto) < 2:
+    prev = index_bars[index_bars.index.date < date.date()]
+    if upto.empty or prev.empty:
         return None
-    return LONG if float(upto["Close"].iloc[-1]) > float(_vwap(upto).iloc[-1]) else SHORT
+    prev_close = float(prev["Close"].iloc[-1])
+    return float(upto["Close"].iloc[-1]) / prev_close - 1.0
+
+
+def index_side(index_bars: pd.DataFrame, date: pd.Timestamp,
+               decision_time: str = DECISION_TIME) -> str | None:
+    """LONG / SHORT / BOTH from the +-0.3% index gate, None if no data."""
+    chg = index_change(index_bars, date, decision_time)
+    return None if chg is None else index_regime(chg)
 
 
 def index_bullish(index_bars: pd.DataFrame, date: pd.Timestamp, decision_time: str = DECISION_TIME) -> bool:
@@ -158,20 +187,19 @@ def rank(universe: dict, date: pd.Timestamp, index_bars: pd.DataFrame | None = N
          or_minutes: int = OPEN_RANGE_MIN, side: str = LONG) -> list[Score]:
     """Ranked picks for `side` (LONG / SHORT / "auto").
 
-    Hard gate: longs only on days the index trades above its own VWAP at
-    decision time, shorts only below it. "auto" picks the side from the index.
+    Hard gate on the index vs its previous close at decision time:
+    >= +0.3% longs only, <= -0.3% shorts only, in between both sides.
     No pick = valid output.
     """
     idx = index_side(index_bars, date, decision_time) if index_bars is not None else None
-    if side == "auto":
-        side = idx or LONG
-    elif require_bullish_index and idx is not None and idx != side:
-        return []
+    if not require_bullish_index and side != "auto":
+        idx = None
     out = []
-    for t, bars in universe.items():
-        s = score_stock(bars.intraday, bars.daily, date, decision_time, or_minutes, side)
-        if s is None:
-            continue
-        s.ticker = t
-        out.append(s)
+    for sd in sides_allowed(idx, side):
+        for t, bars in universe.items():
+            s = score_stock(bars.intraday, bars.daily, date, decision_time, or_minutes, sd)
+            if s is None:
+                continue
+            s.ticker = t
+            out.append(s)
     return sorted(out, key=lambda s: s.score, reverse=True)
