@@ -4,7 +4,7 @@
 #     candle, 09:15-09:30) and build the 5-min candles after it
 #   - at 09:35, 09:40 and 09:45 IST scans the 5-min candle that just closed:
 #     close above OR-high -> long breakout, below OR-low -> short breakout
-#     (side still follows the index vs its VWAP)
+#     (side gated by Nifty vs prev close: >=+0.3% longs, <=-0.3% shorts, else both)
 #   - the 09:45 scan is the final ranked pick; earlier scans are early alerts
 # Requires Chrome running with CDP on localhost:29229 (NSE blocks raw requests).
 set -euo pipefail

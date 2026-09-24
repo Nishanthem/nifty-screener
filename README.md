@@ -1,7 +1,8 @@
 # Nifty Intraday Screener
 
-Daily Nifty 50 screener that suggests the best intraday candidate — long
-when the index is above its VWAP, short when below — with entry, stop, and
+Daily Nifty 50 screener that suggests the best intraday candidate — longs
+only when Nifty is ≥ +0.3% vs its previous close, shorts only when ≤ −0.3%,
+both sides in between — with entry, stop, and
 target, plus a long-wick (tail) check on the first three 15-min candles. Two data paths: **live NSE** (real-time) and
 yfinance (~15 min delayed, used for backtesting and daily ATR/volume context).
 
@@ -40,7 +41,7 @@ The opening range is the **first 15-min candle (09:15–09:30)**. After that
 we look at **5-min candles** and, at 09:35, 09:40 and 09:45 IST, check the
 candle that just closed: a close **above OR-high** is a long breakout, a
 close **below OR-low** a short breakout. `--scan` keeps only stocks with such
-a confirmed close on the index's side (long if Nifty > VWAP, short if below)
+a confirmed close on a side the index gate allows (see *The logic*)
 and ranks them with the usual composite; the first confirming candle is
 reported as `orb_5m` in the components. Each scan first prints `--breakouts`
 (every stock that closed above or below its range, either direction, no
@@ -68,9 +69,11 @@ interface, just implement the provider methods in `app/data.py`.
 
 At the decision time (default 10:00 IST, after opening noise):
 
-1. **Index gate / side** — Nifty above its VWAP → look for longs only;
-   below → shorts only (`--side auto`, the default). Backtest showed longs
-   only had positive expectancy on bullish-index days, and vice versa.
+1. **Index gate / side** — Nifty change vs previous close at decision time:
+   ≥ +0.3% → longs (buy) only; ≤ −0.3% → shorts (sell) only; strictly in
+   between → both buy and sell candidates are ranked together
+   (`--side auto`, the default). `--side long|short` forces one side but is
+   still blocked when the gate points the other way.
 2. Per stock, a weighted score of: gap continuation (0.3–3% ideal),
    opening-range breakout (price > first-15m high), above-VWAP,
    momentum since open, relative volume. ATR% must be 0.8–6%.

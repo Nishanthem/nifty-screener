@@ -14,7 +14,8 @@ from .constituents import NIFTY50
 from .data import YFinanceProvider
 from .nse_live import (fetch_snapshots, persist, opening_range_high, opening_range_low,
                        candles_from_snapshots, scan_breakout, Snapshot, Breakout)
-from .signals import (Score, _atr_pct, composite, levels, MIN_ATR_PCT, MAX_ATR_PCT, LONG, SHORT)
+from .signals import (Score, _atr_pct, composite, levels, MIN_ATR_PCT, MAX_ATR_PCT, LONG, SHORT,
+                      index_regime, sides_allowed)
 from .wicks import long_wicks, Wick
 
 INDEX_SYMBOL = "NIFTY 50"
@@ -57,11 +58,13 @@ def _score_snapshot(s: Snapshot, daily: pd.DataFrame, orh: float | None, orl: fl
 
 
 def rank_live(save: bool = True, side: str = "auto",
-              confirm_orb: bool = False) -> tuple[list[Score], str]:
-    """Returns (ranked picks, side traded).
+              confirm_orb: bool = False) -> tuple[list[Score], str | None, float | None]:
+    """Returns (ranked picks, index regime, index change).
 
-    `side` is LONG, SHORT or "auto" (follow the index: above VWAP -> longs,
-    below -> shorts). Forcing a side against the index gate returns [].
+    `side` is LONG, SHORT or "auto". Index gate vs previous close:
+    >= +0.3% longs only, <= -0.3% shorts only, in between both sides.
+    Forcing a side against the gate returns []. The second element is the
+    regime (LONG / SHORT / BOTH) and the third the index change (fraction).
 
     `confirm_orb` keeps only stocks where a 5-min candle closing at
     09:35/09:40/09:45 closed beyond the 15-min opening range on the traded side.
@@ -72,25 +75,23 @@ def rank_live(save: bool = True, side: str = "auto",
 
     by_sym = {s.symbol: s for s in snaps}
     index = by_sym.get(INDEX_SYMBOL)
-    idx_side = None if index is None else (LONG if index.last > index.vwap else SHORT)
-    if side == "auto":
-        side = idx_side or LONG
-    elif idx_side is not None and idx_side != side:
-        return [], idx_side
+    chg = None if index is None else index.last / index.prev_close - 1.0
+    regime = None if chg is None else index_regime(chg)
 
     provider = YFinanceProvider()
     today = pd.Timestamp.now(tz="Asia/Kolkata")
     out = []
-    for t in NIFTY50:
-        s = by_sym.get(t)
-        if s is None:
-            continue
-        orh, orl = opening_range_high(today, t), opening_range_low(today, t)
-        bo = scan_breakout(today, t, orh, orl) if orh is not None and orl is not None else None
-        sc = _score_snapshot(s, provider.daily(t), orh, orl, side, bo, confirm_orb)
-        if sc is not None:
-            out.append(sc)
-    return sorted(out, key=lambda x: x.score, reverse=True), side
+    for sd in sides_allowed(regime, side):
+        for t in NIFTY50:
+            s = by_sym.get(t)
+            if s is None:
+                continue
+            orh, orl = opening_range_high(today, t), opening_range_low(today, t)
+            bo = scan_breakout(today, t, orh, orl) if orh is not None and orl is not None else None
+            sc = _score_snapshot(s, provider.daily(t), orh, orl, sd, bo, confirm_orb)
+            if sc is not None:
+                out.append(sc)
+    return sorted(out, key=lambda x: x.score, reverse=True), regime, chg
 
 
 def all_breakouts(date: pd.Timestamp | None = None) -> list[tuple[str, float, float, Breakout]]:
