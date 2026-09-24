@@ -153,8 +153,11 @@ def index_regime(change_pct: float) -> str:
 
 
 def sides_allowed(regime: str | None, side: str) -> list[str]:
-    """Sides to trade for a requested `side` (LONG / SHORT / "auto") under `regime`."""
-    if regime is None or regime == BOTH:
+    """Sides to trade for a requested `side` (LONG / SHORT / "auto") under `regime`.
+    No index data (regime None) fails closed: nothing is tradable."""
+    if regime is None:
+        return []
+    if regime == BOTH:
         return [LONG, SHORT] if side == "auto" else [side]
     return [regime] if side in ("auto", regime) else []
 
@@ -192,10 +195,9 @@ def rank(universe: dict, date: pd.Timestamp, index_bars: pd.DataFrame | None = N
     No pick = valid output.
     """
     idx = index_side(index_bars, date, decision_time) if index_bars is not None else None
-    if not require_bullish_index and side != "auto":
-        idx = None
+    sides = [side] if (not require_bullish_index and side != "auto") else sides_allowed(idx, side)
     out = []
-    for sd in sides_allowed(idx, side):
+    for sd in sides:
         for t, bars in universe.items():
             s = score_stock(bars.intraday, bars.daily, date, decision_time, or_minutes, sd)
             if s is None:

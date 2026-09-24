@@ -37,7 +37,7 @@ def _print_pick(s: Score, wick_note: str) -> None:
 
 def _gate_note(regime: str | None, chg: float | None) -> str:
     if regime is None or chg is None:
-        return "Index gate: no index data — both sides allowed"
+        return "Index gate: no index data — no trade (gate fails closed)"
     what = {LONG: "LONGS (buy) only", SHORT: "SHORTS (sell) only", BOTH: "both buy and sell allowed"}[regime]
     return f"Index gate: Nifty {chg * 100:+.2f}% vs prev close -> {what}"
 
