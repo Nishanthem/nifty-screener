@@ -99,6 +99,25 @@ def composite(side: str, gap_pct: float, last: float, orh: float, orl: float,
     return score, comps, risk
 
 
+OR_BREAK_BUFFER = 0.001   # close must clear the OR by >= 0.1% to count as a breakout
+
+
+def vwap_ok(side: str, last: float, vwap: float) -> bool:
+    """Buy only above VWAP, sell only below it."""
+    return last > vwap if side == LONG else last < vwap
+
+
+def breakout_side(close: float, orh: float, orl: float, vwap: float,
+                  buffer: float = OR_BREAK_BUFFER) -> str | None:
+    """LONG if `close` clears ORH by `buffer` and sits above VWAP, SHORT if it
+    clears ORL by `buffer` and sits below VWAP, else None."""
+    if close > orh * (1 + buffer) and vwap_ok(LONG, close, vwap):
+        return LONG
+    if close < orl * (1 - buffer) and vwap_ok(SHORT, close, vwap):
+        return SHORT
+    return None
+
+
 def levels(side: str, last: float, risk: float) -> tuple[float, float]:
     """(stop, target) at 1.5R on the trade's side."""
     if side == LONG:
@@ -126,6 +145,8 @@ def score_stock(intraday: pd.DataFrame, daily: pd.DataFrame, date: pd.Timestamp,
     orng = day[day.index <= day.index[0] + pd.Timedelta(minutes=or_minutes)]
     orh, orl = float(orng["High"].max()), float(orng["Low"].min())
     vwap = float(_vwap(upto).iloc[-1])
+    if not vwap_ok(side, close, vwap):
+        return None
     roc = (close - open_) / open_
     avg_vol = float(daily["Volume"].tail(20).mean())
     rel_vol = float(upto["Volume"].sum() / max(avg_vol, 1))  # share of a full day's volume

@@ -24,6 +24,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .signals import breakout_side
+
 CDP_URL = "http://localhost:29229"
 SEED_PAGE = "https://www.nseindia.com/market-data/live-equity-market"
 API_PATH = ("/api/NextApi/apiClient/marketWatchApi"
@@ -137,12 +139,12 @@ def candles_from_snapshots(date: pd.Timestamp, symbol: str, minutes: int = 15) -
     """
     df = load_snapshots(date)
     if df.empty:
-        return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "VWAP"])
     start = pd.Timestamp(f"{date.date()} 09:15", tz=IST)
     d = df[(df["symbol"] == symbol) & (df["ts"] >= start)].sort_values("ts")
     d = d.drop_duplicates("ts")
     if d.empty:
-        return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "VWAP"])
     new_high = d["high"].where(d["high"] > d["high"].shift().ffill().fillna(-np.inf))
     new_low = d["low"].where(d["low"] < d["low"].shift().ffill().fillna(np.inf))
     hi = pd.concat([d["last"], new_high], axis=1).max(axis=1)
@@ -153,6 +155,8 @@ def candles_from_snapshots(date: pd.Timestamp, symbol: str, minutes: int = 15) -
         "High": hi.groupby(bucket).max(),
         "Low": lo.groupby(bucket).min(),
         "Close": d["last"].groupby(bucket).last(),
+        "VWAP": (d["traded_value"] / d["volume"].replace(0, np.nan)).fillna(d["last"])
+                .groupby(bucket).last(),
         "n": d["last"].groupby(bucket).size(),
     })
     # Only buckets that are complete (polling ran past their end) and have
@@ -172,12 +176,14 @@ class Breakout:
     side: str      # "long" (close > ORH) | "short" (close < ORL)
     close_at: str  # HH:MM the confirming 5-min candle closed
     close: float
+    vwap: float = float("nan")  # day VWAP at the candle close
 
 
 def scan_breakout(date: pd.Timestamp, symbol: str, orh: float, orl: float,
                   closes: tuple[str, ...] = SCAN_CLOSES) -> Breakout | None:
-    """First 5-min candle (closing at one of `closes`) that closed outside the
-    15-min opening range: above ORH -> long, below ORL -> short."""
+    """First 5-min candle (closing at one of `closes`) that closed beyond the
+    15-min opening range by at least OR_BREAK_BUFFER and on the right side of
+    VWAP: above ORH and above VWAP -> long, below ORL and below VWAP -> short."""
     bars = candles_from_snapshots(date, symbol, minutes=SCAN_CANDLE_MIN)
     if bars.empty:
         return None
@@ -187,8 +193,8 @@ def scan_breakout(date: pd.Timestamp, symbol: str, orh: float, orl: float,
         if start not in bars.index:
             continue
         c = float(bars.loc[start, "Close"])
-        if c > orh:
-            return Breakout("long", hhmm, round(c, 2))
-        if c < orl:
-            return Breakout("short", hhmm, round(c, 2))
+        v = float(bars.loc[start, "VWAP"])
+        side = breakout_side(c, orh, orl, v)
+        if side is not None:
+            return Breakout(side, hhmm, round(c, 2), round(v, 2))
     return None
