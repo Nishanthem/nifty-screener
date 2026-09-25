@@ -70,7 +70,7 @@ def main() -> None:
         print(f"5m ORB breakouts vs 15m opening range ({IST:%Y-%m-%d %H:%M} IST): {len(rows)}")
         for sym, orh, orl, b in rows:
             arrow = "ABOVE" if b.side == LONG else "BELOW"
-            print(f"  {sym:<12} {arrow} OR  close={b.close} @ {b.close_at}  orh={orh}  orl={orl}")
+            print(f"  {sym:<12} {arrow} OR  close={b.close} @ {b.close_at}  vwap={b.vwap}  orh={orh}  orl={orl}")
         return
 
     if args.live:

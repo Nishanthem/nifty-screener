@@ -15,7 +15,7 @@ from .data import YFinanceProvider
 from .nse_live import (fetch_snapshots, persist, opening_range_high, opening_range_low,
                        candles_from_snapshots, scan_breakout, Snapshot, Breakout)
 from .signals import (Score, _atr_pct, composite, levels, MIN_ATR_PCT, MAX_ATR_PCT, LONG, SHORT,
-                      index_regime, sides_allowed)
+                      index_regime, sides_allowed, vwap_ok)
 from .wicks import long_wicks, Wick
 
 INDEX_SYMBOL = "NIFTY 50"
@@ -28,6 +28,8 @@ def _score_snapshot(s: Snapshot, daily: pd.DataFrame, orh: float | None, orl: fl
         return None
     atr_pct = _atr_pct(daily)
     if not np.isfinite(atr_pct) or not (MIN_ATR_PCT <= atr_pct <= MAX_ATR_PCT):
+        return None
+    if not vwap_ok(side, s.last, s.vwap):
         return None
 
     gap_pct = (s.open - s.prev_close) / s.prev_close

@@ -2,7 +2,8 @@
 
 Pulls today's 5-min bars from yfinance (~15 min delayed) and reports every
 Nifty 50 stock whose 5-min candle closing at 09:35/09:40/09:45 closed above
-(long) or below (short) its 09:15-09:30 opening range.
+(long) or below (short) its 09:15-09:30 opening range by >= 0.1%, on the
+matching side of VWAP (long above, short below).
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import yfinance as yf
 
 from .constituents import NIFTY50, INDEX_TICKER, yf_symbol
 from .nse_live import SCAN_CLOSES, Breakout
+from .signals import _vwap, breakout_side
 
 IST = "Asia/Kolkata"
 
@@ -53,11 +55,10 @@ def scan(closes: tuple[str, ...] = SCAN_CLOSES) -> tuple[dict, list]:
             if start not in df.index:
                 continue
             c = float(df.loc[start, "Close"])
-            if c > orh:
-                rows.append((t, round(orh, 2), round(orl, 2), Breakout("long", hhmm, round(c, 2))))
-                break
-            if c < orl:
-                rows.append((t, round(orh, 2), round(orl, 2), Breakout("short", hhmm, round(c, 2))))
+            v = float(_vwap(df[df.index <= start]).iloc[-1])
+            side = breakout_side(c, orh, orl, v)
+            if side is not None:
+                rows.append((t, round(orh, 2), round(orl, 2), Breakout(side, hhmm, round(c, 2), round(v, 2))))
                 break
     return info, sorted(rows, key=lambda x: (x[3].close_at, x[0]))
 
@@ -72,7 +73,7 @@ def main() -> None:
         print(f"  NIFTY 50: OR {orl}-{orh}, last {last} @ {at}")
     for sym, orh, orl, b in rows:
         arrow = "ABOVE" if b.side == "long" else "BELOW"
-        print(f"  {sym:<12} {arrow} OR  close={b.close} @ {b.close_at}  orh={orh}  orl={orl}")
+        print(f"  {sym:<12} {arrow} OR  close={b.close} @ {b.close_at}  vwap={b.vwap}  orh={orh}  orl={orl}")
 
 
 if __name__ == "__main__":
