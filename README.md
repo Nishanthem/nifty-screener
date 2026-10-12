@@ -55,9 +55,10 @@ scans. The 09:45 scan is the final pick, the earlier ones are alerts. Live 5-min
 ### Early CMP scans (09:27, 09:32)
 
 Before the first 5-min confirmation, `run_day.sh` runs two early alerts
-(`--cmp-scan MIN`): at **09:27** every stock whose current price (latest
-polled LTP) is beyond its **first-10-min range (09:15–09:25)**, and at
-**09:32** beyond the **15-min range (09:15–09:30)**. Same 0.1% buffer and
+(`--cmp-scan MIN`): at **09:27** every stock whose current price (one fresh
+NSE snapshot) is beyond its **first-10-min range (09:15–09:25)**, and at
+**09:32** beyond the **15-min range (09:15–09:30)**; ranges use snapshots
+stamped strictly before the range end. Same 0.1% buffer and
 VWAP agreement as the 5-min scan, both sides listed, with the index gate
 shown (sides it blocks are tagged). Each ends with a `=== SCAN HHMM DONE ===`
 marker.

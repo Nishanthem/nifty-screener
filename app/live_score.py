@@ -13,7 +13,7 @@ import pandas as pd
 from .constituents import NIFTY50
 from .data import YFinanceProvider
 from .nse_live import (fetch_snapshots, persist, opening_range_high, opening_range_low,
-                       candles_from_snapshots, scan_breakout, load_snapshots, Snapshot, Breakout)
+                       candles_from_snapshots, scan_breakout, Snapshot, Breakout)
 from .signals import (Score, _atr_pct, composite, levels, MIN_ATR_PCT, MAX_ATR_PCT, LONG, SHORT,
                       index_regime, sides_allowed, vwap_ok, breakout_side)
 from .wicks import long_wicks, Wick
@@ -112,35 +112,32 @@ def all_breakouts(date: pd.Timestamp | None = None) -> list[tuple[str, float, fl
     return sorted(out, key=lambda x: (x[3].close_at, x[0]))
 
 
-def price_breakouts(or_minutes: int, date: pd.Timestamp | None = None
+def price_breakouts(or_minutes: int, date: pd.Timestamp | None = None, save: bool = True
                     ) -> tuple[float | None, list[tuple[str, float, float, Breakout]]]:
-    """Every Nifty 50 stock whose latest polled price (CMP) is outside its
-    first-`or_minutes` range (09:15 + or_minutes), using the same 0.1% buffer
-    and VWAP agreement as the 5-min scan, both sides, no index gate.
-    Returns (index change vs prev close, [(symbol, orh, orl, breakout)])."""
+    """Every Nifty 50 stock whose current price (one fresh NSE snapshot batch)
+    is outside its first-`or_minutes` range [09:15, 09:15 + or_minutes), using
+    the same 0.1% buffer and VWAP agreement as the 5-min scan, both sides, no
+    index gate. Returns (index change vs prev close or None, [(symbol, orh, orl, breakout)])."""
     date = date or pd.Timestamp.now(tz="Asia/Kolkata")
-    df = load_snapshots(date)
-    if df.empty:
-        return None, []
-    latest = df.sort_values("ts").groupby("symbol").tail(1).set_index("symbol")
-    chg = None
-    if INDEX_SYMBOL in latest.index:
-        ix = latest.loc[INDEX_SYMBOL]
-        chg = float(ix["last"]) / float(ix["prev_close"]) - 1.0
+    snaps = fetch_snapshots()
+    if save:
+        persist(snaps)
+    by_sym = {s.symbol: s for s in snaps}
+    index = by_sym.get(INDEX_SYMBOL)
+    chg = None if index is None else index.last / index.prev_close - 1.0
     out = []
     for t in NIFTY50:
-        if t not in latest.index:
+        s = by_sym.get(t)
+        if s is None:
             continue
         orh = opening_range_high(date, t, or_minutes)
         orl = opening_range_low(date, t, or_minutes)
         if orh is None or orl is None:
             continue
-        r = latest.loc[t]
-        last = float(r["last"])
-        vwap = float(r["traded_value"]) / float(r["volume"]) if r["volume"] else last
-        side = breakout_side(last, orh, orl, vwap)
+        side = breakout_side(s.last, orh, orl, s.vwap)
         if side is not None:
-            out.append((t, orh, orl, Breakout(side, r["ts"].strftime("%H:%M"), round(last, 2), round(vwap, 2))))
+            at = pd.Timestamp(s.ts).strftime("%H:%M")
+            out.append((t, orh, orl, Breakout(side, at, round(s.last, 2), round(s.vwap, 2))))
     return chg, sorted(out, key=lambda x: (x[3].side, x[0]))
 
 

@@ -66,17 +66,22 @@ def scan(closes: tuple[str, ...] = SCAN_CLOSES) -> tuple[dict, list]:
     return info, sorted(rows, key=lambda x: (x[3].close_at, x[0]))
 
 
-def cmp_scan(or_minutes: int) -> list:
-    """Stocks whose latest 5-min close (CMP proxy) is beyond the first-`or_minutes` range."""
+def cmp_scan(or_minutes: int) -> tuple[list, int]:
+    """Stocks whose latest 5-min bar close (CMP proxy; the bar still forming
+    after the range) is beyond the first-`or_minutes` range. Returns
+    (rows, n_not_ready): stocks whose feed has no bar after the range yet are
+    counted as not ready instead of being silently dropped."""
     today = pd.Timestamp.now(tz=IST).normalize()
     or_end = pd.Timestamp(f"{today.date()} 09:15", tz=IST) + pd.Timedelta(minutes=or_minutes)
-    rows = []
+    rows, not_ready = [], 0
     for t in NIFTY50:
         df = _bars(yf_symbol(t))
         if df.empty:
+            not_ready += 1
             continue
         o = df[df.index < or_end]
-        if len(o) < or_minutes // 5:
+        if len(o) < or_minutes // 5 or df.index[-1] < or_end:
+            not_ready += 1
             continue
         orh, orl = float(o.High.max()), float(o.Low.min())
         c = float(df.Close.iloc[-1])
@@ -85,15 +90,17 @@ def cmp_scan(or_minutes: int) -> list:
         if side is not None:
             rows.append((t, round(orh, 2), round(orl, 2),
                          Breakout(side, df.index[-1].strftime("%H:%M"), round(c, 2), round(v, 2))))
-    return sorted(rows, key=lambda x: (x[3].side, x[0]))
+    return sorted(rows, key=lambda x: (x[3].side, x[0])), not_ready
 
 
 def main() -> None:
     if len(sys.argv) == 3 and sys.argv[1] == "--cmp":
         m = int(sys.argv[2])
-        rows = cmp_scan(m)
+        rows, not_ready = cmp_scan(m)
         now = pd.Timestamp.now(tz=IST)
         print(f"[DELAYED yfinance] CMP vs {m}m opening range ({now:%Y-%m-%d %H:%M} IST): {len(rows)}")
+        if not_ready:
+            print(f"  ({not_ready} stocks skipped: yfinance has no bar after the range yet — feed lagging)")
         for sym, orh, orl, b in rows:
             arrow = "ABOVE" if b.side == "long" else "BELOW"
             print(f"  {sym:<12} {arrow} OR  cmp={b.close} @ {b.close_at} bar  vwap={b.vwap}  orh={orh}  orl={orl}")
