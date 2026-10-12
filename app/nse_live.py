@@ -114,7 +114,9 @@ def _early(date: pd.Timestamp, symbol: str, minutes: int) -> pd.DataFrame:
         return df
     start = pd.Timestamp(f"{date.date()} 09:15", tz=IST)
     cutoff = start + pd.Timedelta(minutes=minutes)
-    return df[(df["symbol"] == symbol) & (df["ts"] >= start) & (df["ts"] <= cutoff)]
+    # [09:15, cutoff): snapshot highs/lows are cumulative, so a row stamped at
+    # the cutoff could already include a print from the next candle.
+    return df[(df["symbol"] == symbol) & (df["ts"] >= start) & (df["ts"] < cutoff)]
 
 
 def opening_range_high(date: pd.Timestamp, symbol: str, minutes: int = 15) -> float | None:

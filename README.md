@@ -17,7 +17,9 @@ python -m app.cli --poll           # save a live snapshot (run 09:15-09:45)
 python -m app.cli --live --scan    # only stocks whose 5-min candle closed beyond the 15-min OR
 python -m app.cli --breakouts      # every stock with a 5-min close above/below its OR (both sides, from snapshots)
 python -m app.yf_orb            # same breakout list from yfinance 5-min bars (fallback when NSE blocks)
-./run_day.sh                       # full routine: poll from 09:15, 5m ORB scans at 09:35/09:40/09:45
+python -m app.cli --cmp-scan 10    # stocks whose current price is above/below the first-10-min range
+python -m app.yf_orb --cmp 10      # same from yfinance 5-min bars
+./run_day.sh                       # full routine: poll from 09:15, CMP scans at 09:27/09:32, 5m ORB scans at 09:35/09:40/09:45
 SIDE=short ./run_day.sh            # force a side (still gated on the index)
 python -m app.cli --side short     # same for the CLI (auto | long | short)
 
@@ -47,8 +49,19 @@ reported as `orb_5m` in the components. Each scan first prints `--breakouts`
 (every stock that closed above or below its range, either direction, no
 index gate) and then the gated ranked picks, followed by a
 `=== SCAN HHMM DONE ===` marker so a runner can notify after each of the
-three scans. The 09:45 scan is the final pick, the earlier ones are alerts. Live 5-min candles are rebuilt from the
+scans. The 09:45 scan is the final pick, the earlier ones are alerts. Live 5-min candles are rebuilt from the
 1/min snapshot poll, so `--poll` must be running from 09:15.
+
+### Early CMP scans (09:27, 09:32)
+
+Before the first 5-min confirmation, `run_day.sh` runs two early alerts
+(`--cmp-scan MIN`): at **09:27** every stock whose current price (one fresh
+NSE snapshot) is beyond its **first-10-min range (09:15–09:25)**, and at
+**09:32** beyond the **15-min range (09:15–09:30)**; ranges use snapshots
+stamped strictly before the range end. Same 0.1% buffer and
+VWAP agreement as the 5-min scan, both sides listed, with the index gate
+shown (sides it blocks are tagged). Each ends with a `=== SCAN HHMM DONE ===`
+marker.
 
 ## Live data notes
 

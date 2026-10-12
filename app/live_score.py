@@ -15,7 +15,7 @@ from .data import YFinanceProvider
 from .nse_live import (fetch_snapshots, persist, opening_range_high, opening_range_low,
                        candles_from_snapshots, scan_breakout, Snapshot, Breakout)
 from .signals import (Score, _atr_pct, composite, levels, MIN_ATR_PCT, MAX_ATR_PCT, LONG, SHORT,
-                      index_regime, sides_allowed, vwap_ok)
+                      index_regime, sides_allowed, vwap_ok, breakout_side)
 from .wicks import long_wicks, Wick
 
 INDEX_SYMBOL = "NIFTY 50"
@@ -110,6 +110,35 @@ def all_breakouts(date: pd.Timestamp | None = None) -> list[tuple[str, float, fl
         if bo is not None:
             out.append((t, orh, orl, bo))
     return sorted(out, key=lambda x: (x[3].close_at, x[0]))
+
+
+def price_breakouts(or_minutes: int, date: pd.Timestamp | None = None, save: bool = True
+                    ) -> tuple[float | None, list[tuple[str, float, float, Breakout]]]:
+    """Every Nifty 50 stock whose current price (one fresh NSE snapshot batch)
+    is outside its first-`or_minutes` range [09:15, 09:15 + or_minutes), using
+    the same 0.1% buffer and VWAP agreement as the 5-min scan, both sides, no
+    index gate. Returns (index change vs prev close or None, [(symbol, orh, orl, breakout)])."""
+    date = date or pd.Timestamp.now(tz="Asia/Kolkata")
+    snaps = fetch_snapshots()
+    if save:
+        persist(snaps)
+    by_sym = {s.symbol: s for s in snaps}
+    index = by_sym.get(INDEX_SYMBOL)
+    chg = None if index is None else index.last / index.prev_close - 1.0
+    out = []
+    for t in NIFTY50:
+        s = by_sym.get(t)
+        if s is None:
+            continue
+        orh = opening_range_high(date, t, or_minutes)
+        orl = opening_range_low(date, t, or_minutes)
+        if orh is None or orl is None:
+            continue
+        side = breakout_side(s.last, orh, orl, s.vwap)
+        if side is not None:
+            at = pd.Timestamp(s.ts).strftime("%H:%M")
+            out.append((t, orh, orl, Breakout(side, at, round(s.last, 2), round(s.vwap, 2))))
+    return chg, sorted(out, key=lambda x: (x[3].side, x[0]))
 
 
 def live_wicks(symbol: str, date: pd.Timestamp | None = None) -> list[Wick]:

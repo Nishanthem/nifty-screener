@@ -6,6 +6,7 @@
     python -m app.cli --poll     # snapshot now (run 09:15-09:45 to fix the opening range + 5m candles)
     python -m app.cli --live --scan  # only stocks whose 5m candle (09:35/40/45 close) broke the 15m OR
     python -m app.cli --breakouts    # list every stock with a 5m close above/below its OR (no gate, no fetch)
+    python -m app.cli --cmp-scan 10  # stocks whose current price is above/below the first-10-min range (09:27 scan)
     python -m app.cli --backtest # validate on ~60d of intraday history
     python -m app.cli --side short   # force shorts (still gated: blocked when Nifty >= +0.3%)
     python -m app.cli --side auto    # default: Nifty >= +0.3% vs prev close -> longs only,
@@ -54,6 +55,8 @@ def main() -> None:
                     help="live: require a 5-min candle close (09:35/09:40/09:45) beyond the 15-min opening range")
     ap.add_argument("--breakouts", action="store_true",
                     help="list all 5-min opening-range breakouts (both sides) from today's snapshots and exit")
+    ap.add_argument("--cmp-scan", type=int, metavar="MIN", default=None,
+                    help="list stocks whose latest polled price is beyond the first-MIN-minutes range and exit")
     ap.add_argument("--side", choices=["auto", LONG, SHORT], default="auto",
                     help="auto follows the index vs prev close: >=+0.3%% longs, <=-0.3%% shorts, else both")
     args = ap.parse_args()
@@ -71,6 +74,22 @@ def main() -> None:
         for sym, orh, orl, b in rows:
             arrow = "ABOVE" if b.side == LONG else "BELOW"
             print(f"  {sym:<12} {arrow} OR  close={b.close} @ {b.close_at}  vwap={b.vwap}  orh={orh}  orl={orl}")
+        return
+
+    if args.cmp_scan:
+        from .live_score import price_breakouts
+        from .signals import sides_allowed
+        chg, rows = price_breakouts(args.cmp_scan)
+        regime = None if chg is None else index_regime(chg)
+        end = (pd.Timestamp("09:15") + pd.Timedelta(minutes=args.cmp_scan)).strftime("%H:%M")
+        print(f"CMP vs {args.cmp_scan}m opening range (09:15-{end}) ({IST:%Y-%m-%d %H:%M} IST): {len(rows)}")
+        print(_gate_note(regime, chg))
+        allowed = sides_allowed(regime, args.side)
+        for sym, orh, orl, b in rows:
+            arrow = "ABOVE" if b.side == LONG else "BELOW"
+            note = "" if b.side in allowed else "  (blocked by index gate)"
+            print(f"  {sym:<12} {arrow} OR  cmp={b.close} @ {b.close_at}  vwap={b.vwap}  "
+                  f"orh={orh}  orl={orl}{note}")
         return
 
     if args.live:
