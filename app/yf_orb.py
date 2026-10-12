@@ -4,6 +4,9 @@ Pulls today's 5-min bars from yfinance (~15 min delayed) and reports every
 Nifty 50 stock whose 5-min candle closing at 09:35/09:40/09:45 closed above
 (long) or below (short) its 09:15-09:30 opening range by >= 0.1%, on the
 matching side of VWAP (long above, short below).
+
+`python -m app.yf_orb --cmp 10` instead lists stocks whose latest price is
+beyond the first-10-min range (09:15-09:25), same buffer and VWAP rules.
 """
 
 from __future__ import annotations
@@ -63,7 +66,38 @@ def scan(closes: tuple[str, ...] = SCAN_CLOSES) -> tuple[dict, list]:
     return info, sorted(rows, key=lambda x: (x[3].close_at, x[0]))
 
 
+def cmp_scan(or_minutes: int) -> list:
+    """Stocks whose latest 5-min close (CMP proxy) is beyond the first-`or_minutes` range."""
+    today = pd.Timestamp.now(tz=IST).normalize()
+    or_end = pd.Timestamp(f"{today.date()} 09:15", tz=IST) + pd.Timedelta(minutes=or_minutes)
+    rows = []
+    for t in NIFTY50:
+        df = _bars(yf_symbol(t))
+        if df.empty:
+            continue
+        o = df[df.index < or_end]
+        if len(o) < or_minutes // 5:
+            continue
+        orh, orl = float(o.High.max()), float(o.Low.min())
+        c = float(df.Close.iloc[-1])
+        v = float(_vwap(df).iloc[-1])
+        side = breakout_side(c, orh, orl, v)
+        if side is not None:
+            rows.append((t, round(orh, 2), round(orl, 2),
+                         Breakout(side, df.index[-1].strftime("%H:%M"), round(c, 2), round(v, 2))))
+    return sorted(rows, key=lambda x: (x[3].side, x[0]))
+
+
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--cmp":
+        m = int(sys.argv[2])
+        rows = cmp_scan(m)
+        now = pd.Timestamp.now(tz=IST)
+        print(f"[DELAYED yfinance] CMP vs {m}m opening range ({now:%Y-%m-%d %H:%M} IST): {len(rows)}")
+        for sym, orh, orl, b in rows:
+            arrow = "ABOVE" if b.side == "long" else "BELOW"
+            print(f"  {sym:<12} {arrow} OR  cmp={b.close} @ {b.close_at} bar  vwap={b.vwap}  orh={orh}  orl={orl}")
+        return
     closes = tuple(sys.argv[1:]) or SCAN_CLOSES
     info, rows = scan(closes)
     now = pd.Timestamp.now(tz=IST)

@@ -2,6 +2,8 @@
 # Full live trading-day routine.
 #   - polls snapshots from 09:15 to establish the opening range (first 15-min
 #     candle, 09:15-09:30) and build the 5-min candles after it
+#   - 09:27 IST: early alert, current price vs the first-10-min range (09:15-09:25)
+#   - 09:32 IST: early alert, current price vs the 15-min range (09:15-09:30)
 #   - at 09:35, 09:40 and 09:45 IST scans the 5-min candle that just closed:
 #     close above OR-high -> long breakout, below OR-low -> short breakout
 #     (side gated by Nifty vs prev close: >=+0.3% longs, <=-0.3% shorts, else both)
@@ -11,7 +13,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 SIDE="${SIDE:-auto}"   # auto | long | short
-SCANS=(0935 0940 0945)
+SCANS=(0927 0932 0935 0940 0945)
+declare -A CMP_OR=([0927]=10 [0932]=15)   # scan time -> OR minutes for CMP scans
 FINAL=0945
 
 echo "polling snapshots until ${FINAL} IST (15m opening range + 5m candles)..."
@@ -23,7 +26,14 @@ while :; do
   for t in "${SCANS[@]}"; do
     [ "$now" -ge "$t" ] && [ "$t" -gt "$last" ] && due="$t"
   done
-  if [ "$due" -ne 0 ]; then
+  if [ "$due" -ne 0 ] && [ -n "${CMP_OR[$due]:-}" ]; then
+    m="${CMP_OR[$due]}"
+    echo "--- CMP scan vs ${m}m OR @ ${due} IST (now $now) ---"
+    python3 -m app.cli --cmp-scan "$m" --side "$SIDE" || true
+    python3 -m app.yf_orb --cmp "$m" || true
+    echo "=== SCAN ${due} DONE ==="
+    last="$due"
+  elif [ "$due" -ne 0 ]; then
     echo "--- 5m ORB scan @ ${due} IST (now $now) ---"
     # every stock that closed a 5m candle above/below its OR (both sides), then the gated ranked picks
     python3 -m app.cli --breakouts || true
