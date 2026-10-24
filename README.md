@@ -64,6 +64,10 @@ VWAP agreement as the 5-min scan, both sides listed, with the index gate
 shown (sides it blocks are tagged). Each ends with a `=== SCAN HHMM DONE ===`
 marker.
 
+Every CMP and 5-min breakout list is followed by a **Near VWAP / prev close**
+block: listed stocks whose latest polled price is within 0.25% (`NEAR_PCT`)
+of the day VWAP or the previous close, i.e. breakouts that may stall or reverse.
+
 ## Live data notes
 
 NSE's JSON endpoints (`/api/NextApi/...`) reject datacenter IPs directly
