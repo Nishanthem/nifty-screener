@@ -6,7 +6,7 @@
     python -m app.cli --poll     # snapshot now (run 09:15-09:45 to fix the opening range + 5m candles)
     python -m app.cli --live --scan  # only stocks whose 5m candle (09:35/40/45 close) broke the 15m OR
     python -m app.cli --breakouts    # list every stock with a 5m close above/below its OR (no gate, no fetch)
-    python -m app.cli --cmp-scan 10  # stocks whose current price is above/below the first-10-min range (09:27 scan)
+    python -m app.cli --cmp-scan 10  # stocks whose current price is above/below the first-10-min range (09:25:10 scan)
     python -m app.cli --backtest # validate on ~60d of intraday history
     python -m app.cli --side short   # force shorts (still gated: blocked when Nifty >= +0.3%)
     python -m app.cli --side auto    # default: Nifty >= +0.3% vs prev close -> longs only,
