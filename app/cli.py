@@ -6,7 +6,7 @@
     python -m app.cli --poll     # snapshot now (run 09:15-09:45 to fix the opening range + 5m candles)
     python -m app.cli --live --scan  # only stocks whose 5m candle (09:35/40/45 close) broke the 15m OR
     python -m app.cli --breakouts    # list every stock with a 5m close above/below its OR (no gate, no fetch)
-    python -m app.cli --cmp-scan 10  # stocks whose current price is above/below the first-10-min range (09:27 scan)
+    python -m app.cli --cmp-scan 10  # stocks whose current price is above/below the first-10-min range (09:25:10 scan)
     python -m app.cli --backtest # validate on ~60d of intraday history
     python -m app.cli --side short   # force shorts (still gated: blocked when Nifty >= +0.3%)
     python -m app.cli --side auto    # default: Nifty >= +0.3% vs prev close -> longs only,
@@ -43,6 +43,14 @@ def _gate_note(regime: str | None, chg: float | None) -> str:
     return f"Index gate: Nifty {chg * 100:+.2f}% vs prev close -> {what}"
 
 
+def _print_near(symbols: list[str]) -> None:
+    from .live_score import near_levels, NEAR_PCT
+    rows = near_levels(symbols)
+    print(f"Near VWAP / prev close (latest price within {NEAR_PCT * 100:.2f}%): {len(rows) or 'none'}")
+    for sym, last, at, vwap, pc, tags in rows:
+        print(f"  {sym:<12} last={last} @ {at}  vwap={vwap}  prev_close={pc}  -> near {', '.join(tags)}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--top", type=int, default=3)
@@ -74,6 +82,7 @@ def main() -> None:
         for sym, orh, orl, b in rows:
             arrow = "ABOVE" if b.side == LONG else "BELOW"
             print(f"  {sym:<12} {arrow} OR  close={b.close} @ {b.close_at}  vwap={b.vwap}  orh={orh}  orl={orl}")
+        _print_near([r[0] for r in rows])
         return
 
     if args.cmp_scan:
@@ -90,6 +99,7 @@ def main() -> None:
             note = "" if b.side in allowed else "  (blocked by index gate)"
             print(f"  {sym:<12} {arrow} OR  cmp={b.close} @ {b.close_at}  vwap={b.vwap}  "
                   f"orh={orh}  orl={orl}{note}")
+        _print_near([r[0] for r in rows])
         return
 
     if args.live:

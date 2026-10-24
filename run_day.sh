@@ -2,7 +2,8 @@
 # Full live trading-day routine.
 #   - polls snapshots from 09:15 to establish the opening range (first 15-min
 #     candle, 09:15-09:30) and build the 5-min candles after it
-#   - 09:27 IST: early alert, current price vs the first-10-min range (09:15-09:25)
+#   - 09:25:10 IST (sharp, 10s after the 10-min range closes): early alert,
+#     current price vs the first-10-min range (09:15-09:25)
 #   - 09:32 IST: early alert, current price vs the 15-min range (09:15-09:30)
 #   - at 09:35, 09:40 and 09:45 IST scans the 5-min candle that just closed:
 #     close above OR-high -> long breakout, below OR-low -> short breakout
@@ -13,25 +14,29 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 SIDE="${SIDE:-auto}"   # auto | long | short
-SCANS=(0927 0932 0935 0940 0945)
-declare -A CMP_OR=([0927]=10 [0932]=15)   # scan time -> OR minutes for CMP scans
-FINAL=0945
+SCANS=(092510 093200 093500 094000 094500)   # HHMMSS IST
+declare -A CMP_OR=([092510]=10 [093200]=15)   # scan time -> OR minutes for CMP scans
+FIRST=092510   # the loop sleeps to this exact second instead of the next 1/min poll
+FINAL=094500
 
 echo "polling snapshots until ${FINAL} IST (15m opening range + 5m candles)..."
 last=0
 while :; do
-  now="$(TZ=Asia/Kolkata date +%H%M)"
-  python3 -m app.cli --poll || true
+  now="$(TZ=Asia/Kolkata date +%H%M%S)"
   due=0
   for t in "${SCANS[@]}"; do
     [ "$now" -ge "$t" ] && [ "$t" -gt "$last" ] && due="$t"
   done
+  # CMP scans take (and persist) their own fresh snapshot; skip the poll so they fire on time
+  if [ "$due" -eq 0 ] || [ -z "${CMP_OR[$due]:-}" ]; then
+    python3 -m app.cli --poll || true
+  fi
   if [ "$due" -ne 0 ] && [ -n "${CMP_OR[$due]:-}" ]; then
     m="${CMP_OR[$due]}"
     echo "--- CMP scan vs ${m}m OR @ ${due} IST (now $now) ---"
     python3 -m app.cli --cmp-scan "$m" --side "$SIDE" || true
     python3 -m app.yf_orb --cmp "$m" || true
-    echo "=== SCAN ${due} DONE ==="
+    echo "=== SCAN ${due:0:4} DONE ==="
     last="$due"
   elif [ "$due" -ne 0 ]; then
     echo "--- 5m ORB scan @ ${due} IST (now $now) ---"
@@ -42,12 +47,17 @@ while :; do
     if [ "$due" -ge "$FINAL" ]; then
       python3 -m app.cli --live --scan --top 3 --side "$SIDE" \
         || python3 -m app.cli --top 3 --time 09:45 --side "$SIDE"
-      echo "=== SCAN ${due} DONE (final) ==="
+      echo "=== SCAN ${due:0:4} DONE (final) ==="
       break
     fi
     python3 -m app.cli --live --scan --top 3 --side "$SIDE" || true
-    echo "=== SCAN ${due} DONE ==="
+    echo "=== SCAN ${due:0:4} DONE ==="
     last="$due"
   fi
-  sleep 60
+  nap=60
+  if [ "$last" -lt "$FIRST" ]; then
+    left=$(( $(TZ=Asia/Kolkata date -d "today ${FIRST:0:2}:${FIRST:2:2}:${FIRST:4:2}" +%s) - $(date +%s) ))
+    [ "$left" -gt 0 ] && [ "$left" -lt "$nap" ] && nap="$left"
+  fi
+  sleep "$nap"
 done

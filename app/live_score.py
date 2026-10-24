@@ -13,12 +13,13 @@ import pandas as pd
 from .constituents import NIFTY50
 from .data import YFinanceProvider
 from .nse_live import (fetch_snapshots, persist, opening_range_high, opening_range_low,
-                       candles_from_snapshots, scan_breakout, Snapshot, Breakout)
+                       candles_from_snapshots, scan_breakout, load_snapshots, Snapshot, Breakout)
 from .signals import (Score, _atr_pct, composite, levels, MIN_ATR_PCT, MAX_ATR_PCT, LONG, SHORT,
                       index_regime, sides_allowed, vwap_ok, breakout_side)
 from .wicks import long_wicks, Wick
 
 INDEX_SYMBOL = "NIFTY 50"
+NEAR_PCT = 0.0025   # latest price within 0.25% of day VWAP / prev close counts as "near"
 
 
 def _score_snapshot(s: Snapshot, daily: pd.DataFrame, orh: float | None, orl: float | None,
@@ -139,6 +140,33 @@ def price_breakouts(or_minutes: int, date: pd.Timestamp | None = None, save: boo
             at = pd.Timestamp(s.ts).strftime("%H:%M")
             out.append((t, orh, orl, Breakout(side, at, round(s.last, 2), round(s.vwap, 2))))
     return chg, sorted(out, key=lambda x: (x[3].side, x[0]))
+
+
+def near_levels(symbols: list[str], date: pd.Timestamp | None = None, pct: float = NEAR_PCT
+                ) -> list[tuple[str, float, str, float, float, list[str]]]:
+    """Of `symbols`, those whose latest polled price is within `pct` of the
+    day VWAP or the previous close. Returns [(symbol, last, hh:mm:ss, vwap,
+    prev_close, ["VWAP -0.10%", "prev close +0.05%"])]."""
+    date = date or pd.Timestamp.now(tz="Asia/Kolkata")
+    df = load_snapshots(date)
+    if df.empty:
+        return []
+    latest = df[df["ts"].dt.date == date.date()].sort_values("ts").groupby("symbol").last()
+    out = []
+    for t in symbols:
+        if t not in latest.index:
+            continue
+        r = latest.loc[t]
+        vwap = r["traded_value"] / r["volume"] if r["volume"] else r["last"]
+        tags = []
+        for name, ref in (("VWAP", vwap), ("prev close", r["prev_close"])):
+            d = r["last"] / ref - 1.0
+            if abs(d) <= pct:
+                tags.append(f"{name} {d * 100:+.2f}%")
+        if tags:
+            out.append((t, round(float(r["last"]), 2), r["ts"].strftime("%H:%M:%S"),
+                        round(float(vwap), 2), round(float(r["prev_close"]), 2), tags))
+    return out
 
 
 def live_wicks(symbol: str, date: pd.Timestamp | None = None) -> list[Wick]:
