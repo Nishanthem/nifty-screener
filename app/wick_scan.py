@@ -14,13 +14,17 @@ improved the backtest).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
 from .constituents import NIFTY50
-from .reversal import Setup, scan_frame, best_per_day, outcome, to_frame, DECISION, BULL
+from .reversal import (Setup, scan_frame, best_per_day, outcome, to_frame, first_touch,
+                       DECISION, BULL)
 
 IST = "Asia/Kolkata"
+GAP_FILL_PCT = 0.3  # opened at least this far from prev close, then traded back to it
 
 
 def grade(s: Setup) -> str:
@@ -45,20 +49,65 @@ def _history(ticker: str, date: pd.Timestamp) -> pd.DataFrame:
     return p.intraday(ticker, days=7 if recent else 60, interval="5m")
 
 
-def scan_delayed(date: pd.Timestamp, decision: str = DECISION, tickers=NIFTY50) -> list[Setup]:
-    """yfinance 5m bars (exchange OHLC, ~15 min delayed; any of the last ~60 days)."""
-    out = []
+def _official_closes(tickers, date: pd.Timestamp) -> dict[str, pd.Series]:
+    """Unadjusted daily closes (the exchange close) for previous-close checks."""
+    import yfinance as yf
+    from .constituents import yf_symbol
+    days = max(10, (pd.Timestamp.now(tz=IST).normalize() - date.normalize()).days + 10)
+    df = yf.download([yf_symbol(t) for t in tickers], period=f"{days}d", interval="1d",
+                     progress=False, auto_adjust=False, group_by="ticker")
+    out = {}
     for t in tickers:
-        out += scan_frame(t, _history(t, date), {date.date()}, decision)
-    return rank(out)
+        try:
+            out[t] = df[yf_symbol(t)]["Close"].dropna()
+        except KeyError:
+            out[t] = pd.Series(dtype=float)
+    return out
 
 
-def scan_live(date: pd.Timestamp | None = None, decision: str = DECISION, tickers=NIFTY50) -> list[Setup]:
+def _prev_close(official: pd.Series, date: pd.Timestamp) -> float | None:
+    prior = official[[pd.Timestamp(i).date() < date.date() for i in official.index]]
+    return float(prior.iloc[-1]) if not prior.empty else None
+
+
+@dataclass
+class ScanResult:
+    setups: list[Setup]
+    pc_touches: dict[str, tuple[str, float, float]]  # ticker -> (first candle touching prev close, prev close, gap %)
+
+
+def _scan(frames: dict[str, pd.DataFrame], closes: dict[str, float | pd.Series], date: pd.Timestamp,
+          decision: str) -> ScanResult:
+    setups, touches = [], {}
+    for t, df in frames.items():
+        c = closes.get(t)
+        series = c if isinstance(c, pd.Series) else None
+        setups += scan_frame(t, df, {date.date()}, decision, official_close=series)
+        pc = _prev_close(c, date) if series is not None else c
+        if pc:
+            day = df[df.index.date == date.date()]
+            when = first_touch(day, date, pc, decision)
+            if when:
+                gap = (float(day["Open"].iloc[0]) - pc) / pc * 100
+                touches[t] = (when, round(pc, 2), round(gap, 2))
+    return ScanResult(rank(setups), touches)
+
+
+def scan_delayed(date: pd.Timestamp, decision: str = DECISION, tickers=NIFTY50) -> ScanResult:
+    """yfinance 5m bars (exchange OHLC, ~15 min delayed; any of the last ~60 days)."""
+    frames = {t: _history(t, date) for t in tickers}
+    return _scan(frames, _official_closes(tickers, date), date, decision)
+
+
+def scan_live(date: pd.Timestamp | None = None, decision: str = DECISION, tickers=NIFTY50) -> ScanResult:
     """Today's 5m candles rebuilt from polled NSE snapshots (run `--poll` from 09:15),
     stitched onto yfinance history for RSI warm-up and previous-day levels."""
-    from .nse_live import candles_from_snapshots
+    from .nse_live import candles_from_snapshots, load_snapshots
     date = date or pd.Timestamp.now(tz=IST)
-    out = []
+    snaps = load_snapshots(date)
+    prev_close = (snaps[snaps["prev_close"] > 0].groupby("symbol")["prev_close"].first().to_dict()
+                  if not snaps.empty else {})
+    frames, closes = {}, {}
     for t in tickers:
         today = candles_from_snapshots(date, t, minutes=5)
         if today.empty:
@@ -66,25 +115,41 @@ def scan_live(date: pd.Timestamp | None = None, decision: str = DECISION, ticker
         today = today.assign(Volume=np.nan)
         today.index = pd.DatetimeIndex(today.index).tz_convert(IST)
         hist = _history(t, date)
-        hist = hist[hist.index.date < date.date()]
-        out += scan_frame(t, pd.concat([hist, today]), {date.date()}, decision)
-    return rank(out)
+        frames[t] = pd.concat([hist[hist.index.date < date.date()], today])
+        if t in prev_close:
+            closes[t] = pd.Series([prev_close[t]], index=[(date - pd.Timedelta(days=1)).date()])
+    return _scan(frames, closes, date, decision)
 
 
-def report(setups: list[Setup], date: pd.Timestamp, source: str = "") -> str:
+def report(res: ScanResult, date: pd.Timestamp, source: str = "") -> str:
     head = (f"Opening reversal scan (long-tail 5m candles 09:15-{DECISION}) — {date.date()}"
             f"{f' ({source})' if source else ''}")
-    if not setups:
-        return f"{head}\n  none"
-    lines = [head, f"  {'grade':<5} {'side':<4} {'stock':<11} {'candle':<6} {'tail%':>5} {'move%':>6} "
-                   f"{'RSI':>5} {'PDL/PDH':>7} {'relvol':>6} {'vwap':>4}  entry→stop"]
-    for s in setups:
-        lvl = "test" if s.flags["level"] else f"{s.level_pct:+.2f}"
-        rv = "-" if not np.isfinite(s.rel_vol) else f"{s.rel_vol:.1f}"
-        lines.append(f"  {grade(s):<5} {'BUY' if s.side == BULL else 'SELL':<4} {s.ticker:<11} {s.time:<6} "
-                     f"{s.wick_pct:>5.2f} {s.move_pct:>+6.2f} {s.rsi:>5.1f} {lvl:>7} {rv:>6} "
-                     f"{'ok' if s.vwap_ok else '-':>4}  {s.entry}→{s.stop}")
-    lines.append("  A = RSI extreme + prev-day level test, B = one of them, C = tail only. Not investment advice.")
+    lines = [head]
+    if not res.setups:
+        lines.append("  no long-tail candles")
+    else:
+        lines.append(f"  {'grade':<5} {'side':<4} {'stock':<11} {'candle':<6} {'tail%':>5} {'move%':>6} "
+                     f"{'RSI':>5} {'PDL/PDH':>7} {'prevC':>9} {'relvol':>6} {'vwap':>4}  entry→stop")
+        for s in res.setups:
+            lvl = "test" if s.flags["level"] else f"{s.level_pct:+.2f}"
+            pc = "TOUCHED" if s.pc_touch else "-"
+            rv = "-" if not np.isfinite(s.rel_vol) else f"{s.rel_vol:.1f}"
+            lines.append(f"  {grade(s):<5} {'BUY' if s.side == BULL else 'SELL':<4} {s.ticker:<11} {s.time:<6} "
+                         f"{s.wick_pct:>5.2f} {s.move_pct:>+6.2f} {s.rsi:>5.1f} {lvl:>7} {pc:>9} {rv:>6} "
+                         f"{'ok' if s.vwap_ok else '-':>4}  {s.entry}→{s.stop}")
+    tails = {s.ticker for s in res.setups}
+    lines.append("")
+    lines.append(f"Touched previous day's close 09:15-{DECISION} (gap fills first):")
+    if not res.pc_touches:
+        lines.append("  none")
+    order = sorted(res.pc_touches.items(), key=lambda kv: (abs(kv[1][2]) < GAP_FILL_PCT, kv[1][0], kv[0]))
+    for t, (when, pc, gap) in order:
+        kind = "GAP FILL" if abs(gap) >= GAP_FILL_PCT else "opened near it"
+        lines.append(f"  {t:<11} {when}  prev close {pc:<9} open gap {gap:+.2f}%  {kind:<14}"
+                     f"{'  <- also a long-tail setup' if t in tails else ''}")
+    lines.append("")
+    lines.append("  A = RSI extreme + prev-day level test, B = one of them, C = tail only. "
+                 "prevC TOUCHED = the tail candle's range touched the previous day's close. Not investment advice.")
     return "\n".join(lines)
 
 
@@ -92,11 +157,12 @@ def backtest(tickers=NIFTY50) -> pd.DataFrame:
     """Every graded setup over the ~60 days yfinance serves at 5m, with trade outcomes."""
     from .data import YFinanceProvider
     p = YFinanceProvider()
+    closes = _official_closes(tickers, pd.Timestamp.now(tz=IST) - pd.Timedelta(days=90))
     rows = []
     for t in tickers:
         df = p.intraday(t, days=60, interval="5m")
         days = {d: b for d, b in df.groupby(df.index.date)}
-        for s in best_per_day(scan_frame(t, df)):
+        for s in best_per_day(scan_frame(t, df, official_close=closes.get(t))):
             o = outcome(s, days[pd.Timestamp(s.date).date()])
             rows.append({**to_frame([s]).iloc[0].to_dict(), "grade": grade(s), **o})
     return pd.DataFrame(rows).dropna(subset=["r"])
@@ -107,5 +173,6 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
         return pd.Series({"setups": len(d), "hit_%": round((d.r > 0).mean() * 100, 1),
                           "avg_R": round(d.r.mean(), 3), "eod_%": round(d.ret_eod.mean(), 3)})
     groups = {"all": df, **{f"grade {g}": df[df.grade == g] for g in "ABC"},
-              "A+B": df[df.grade < "C"]}
+              "A+B": df[df.grade < "C"],
+              "tail touched prev close": df[df.pc_touch], "tail not at prev close": df[~df.pc_touch]}
     return pd.DataFrame({k: row(v) for k, v in groups.items() if len(v)}).T

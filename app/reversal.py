@@ -33,6 +33,7 @@ MIN_WICK_PCT = 0.25       # tail must be at least this % of price
 RSI_PERIOD = 14
 RSI_LO, RSI_HI = 35, 65
 REL_VOL_MIN = 1.5
+PC_TOL = 0.0002            # within 0.02% of prev close counts as touching it
 LEVEL_TOL = 0.002          # within 0.2% of prev day low/high counts as a test
 MIN_AGAINST_PCT = 0.3      # move into the tail of at least 0.3% from prev close
 TARGET_R = 1.5
@@ -60,6 +61,8 @@ class Setup:
     vwap_ok: bool
     entry: float
     stop: float
+    prev_close: float = np.nan
+    pc_touch: bool = False  # tail candle's range touched the previous day's close
     flags: dict = field(default_factory=dict)
 
     @property
@@ -125,10 +128,24 @@ def day_setups(ticker: str, bars: pd.DataFrame, date, rsi_series: pd.Series,
                   rsi=round(r_ext, 1) if np.isfinite(r_ext) else np.nan,
                   rel_vol=round(rv, 2) if np.isfinite(rv) else np.nan, level_pct=round(lvl, 2),
                   vwap_ok=(last_close > vwap) if bull else (last_close < vwap),
-                  entry=round(entry, 2), stop=round(stop, 2))
+                  entry=round(entry, 2), stop=round(stop, 2), prev_close=round(prev["close"], 2),
+                  pc_touch=touches(b, prev["close"]))
         s.flags = _flags(s)
         out.append(s)
     return out
+
+
+def touches(bar, level: float, tol: float = PC_TOL) -> bool:
+    return float(bar["Low"]) <= level * (1 + tol) and float(bar["High"]) >= level * (1 - tol)
+
+
+def first_touch(bars: pd.DataFrame, date, level: float, decision: str = DECISION) -> str | None:
+    """Start time (HH:MM) of the first opening candle before `decision` whose range touched `level`."""
+    t = bars.index.strftime("%H:%M")
+    for ts, b in bars[(t >= "09:15") & (t < decision)].iterrows():
+        if touches(b, level):
+            return ts.strftime("%H:%M")
+    return None
 
 
 def best_per_day(setups: list[Setup]) -> list[Setup]:
@@ -154,12 +171,22 @@ def _slot_volume(intraday: pd.DataFrame, lookback: int = 10) -> pd.DataFrame:
     return piv.rolling(lookback, min_periods=3).mean().shift(1)
 
 
-def scan_frame(ticker: str, intraday: pd.DataFrame, dates=None, decision: str = DECISION) -> list[Setup]:
-    """All setups for a stock over `dates` (default: every day in the frame)."""
+def scan_frame(ticker: str, intraday: pd.DataFrame, dates=None, decision: str = DECISION,
+               official_close: pd.Series | None = None) -> list[Setup]:
+    """All setups for a stock over `dates` (default: every day in the frame).
+
+    `official_close` (date -> exchange close) replaces the last 5m bar's close as
+    the previous close; the official close is the 15:30 auction price.
+    """
     if intraday.empty:
         return []
     r = rsi(intraday["Close"])
     prev = _prev_levels(intraday)
+    if official_close is not None and not official_close.empty:
+        oc = official_close.copy()
+        oc.index = pd.Index([pd.Timestamp(i).date() for i in oc.index])
+        prev["close"] = [oc[oc.index < d].iloc[-1] if (oc.index < d).any() else c
+                         for d, c in zip(prev.index, prev["close"])]
     sv = _slot_volume(intraday)
     out = []
     for d, bars in intraday.groupby(intraday.index.date):

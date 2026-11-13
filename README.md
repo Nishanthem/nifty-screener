@@ -122,8 +122,16 @@ Each one is checked against:
 | VWAP | 09:25 close back on the reversal side of VWAP | shown only, mixed |
 | relative volume | tail candle volume vs. 10-day average for that 5m slot | shown only, didn't help; yfinance often reports 0 volume for 09:15 |
 
-Grade **A** = RSI + level, **B** = one of them, **C** = tail only. Setups
-where price at 09:30 has already moved past the tail's extreme are dropped.
+Grade **A** = RSI + level, **B** = one of them, **C** = tail only. The scan
+lists every tail, C included. Setups where price at 09:30 has already moved
+past the tail's extreme are dropped.
+
+**Previous close**: the `prevC` column marks tails whose candle touched the
+previous day's official close. A second list shows every Nifty 50 stock that
+touched its previous close between 09:15 and 09:30. **GAP FILL** stocks (opened
+≥ 0.3% away, then came back) are listed first, before stocks that simply
+opened near the previous close. The previous close is the unadjusted exchange
+close (yfinance daily, or NSE's `previousClose` on the live path).
 Trade model: enter at 09:30, stop just beyond the tail's extreme, 1.5R
 target, square off 15:15.
 
@@ -137,8 +145,11 @@ one setup per stock-day, no costs):
 | grade B | 207 | 47.8% | +0.15R | +0.25% |
 | grade C | 400 | 45.2% | +0.03R | +0.04% |
 | control: fade every opening move, no tail filter | 2991 | 42.6% | +0.03R | +0.03% |
+| tail touched prev close | 250 | 46.8% | +0.10R | +0.22% |
+| tail not at prev close | 561 | 48.1% | +0.11R | +0.15% |
 
-Tails do carry information compared with blindly fading the open, and RSI plus
+Touching the previous close is neutral on its own, so it's reported but doesn't
+change the grade. Tails do carry information compared with blindly fading the open, and RSI plus
 the prev-day level roughly double the edge. After ~0.05–0.1R of costs only
 grade A clearly stays positive. This is a single 59-day window, so paper-trade it first.
 
