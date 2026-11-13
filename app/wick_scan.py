@@ -141,8 +141,13 @@ def scan_live(date: pd.Timestamp | None = None, decision: str = DECISION, ticker
             continue
         today = today.assign(Volume=np.nan)
         today.index = pd.DatetimeIndex(today.index).tz_convert(IST)
+        if pd.Timestamp(snaps["ts"].min()).tz_convert(IST) > today.index[0] + pd.Timedelta(seconds=30):
+            today = today.iloc[1:]  # polling began mid-candle; take that candle from yfinance
+        if today.empty:
+            continue
         hist = _history(t, date)
-        frames[t] = pd.concat([hist[hist.index.date < date.date()], today])
+        # yfinance fills today's candles from before polling began (e.g. 09:15-09:25 for a 09:45 run)
+        frames[t] = pd.concat([hist[hist.index < today.index[0]], today])
         if t in prev_close:
             closes[t] = pd.Series([prev_close[t]], index=[(date - pd.Timedelta(days=1)).date()])
     return _scan(frames, closes, date, decision, window_start(decision))

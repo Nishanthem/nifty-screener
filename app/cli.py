@@ -45,6 +45,9 @@ def main() -> None:
     ap.add_argument("--backtest", action="store_true")
     ap.add_argument("--live", action="store_true", help="use live NSE data")
     ap.add_argument("--poll", action="store_true", help="persist a live snapshot and exit")
+    ap.add_argument("--poll-until", metavar="HH:MM",
+                    help="persist live snapshots every --every seconds (from 09:15) until HH:MM IST")
+    ap.add_argument("--every", type=int, default=15)
     ap.add_argument("--side", choices=["auto", LONG, SHORT], default="auto",
                     help="auto follows the index: longs above VWAP, shorts below")
     ap.add_argument("--reversal", action="store_true",
@@ -78,6 +81,23 @@ def main() -> None:
                     print(rolling.fmt(t))
             return
         rolling.watch(live=args.live, strong_only=args.strong)
+        return
+
+    if args.poll_until:
+        import time
+        from .nse_live import fetch_snapshots, persist
+        until = pd.Timestamp(f"{pd.Timestamp.now(tz='Asia/Kolkata').date()} {args.poll_until}",
+                             tz="Asia/Kolkata")
+        n = 0
+        while (now := pd.Timestamp.now(tz="Asia/Kolkata")) < until:
+            if now.strftime("%H:%M:%S") >= "09:14:50":
+                try:
+                    persist(fetch_snapshots())
+                    n += 1
+                except Exception as e:  # keep polling through transient NSE/CDP errors
+                    print(f"{now:%H:%M:%S} poll failed: {e}", flush=True)
+            time.sleep(args.every)
+        print(f"polled {n} times until {args.poll_until}")
         return
 
     if args.poll:
