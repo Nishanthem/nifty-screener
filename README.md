@@ -161,6 +161,18 @@ grade A clearly stays positive. This is a single 59-day window, so paper-trade i
 and lists stocks whose range touched the previous close in that window, marking `CROSSED UP/DOWN`
 when price ended the window on the other side of it.
 
+### Live NSE data for the 09:30 / 09:45 scans
+
+NSE only serves price snapshots, so the candles are rebuilt by polling through the window:
+
+```bash
+./run_reversal.sh 09:30   # start by ~09:12; polls every 15s 09:15-09:30, then scans
+./run_reversal.sh 09:45   # start by ~09:28; polls 09:30-09:45, then scans
+```
+
+Candles from before polling began (e.g. 09:15-09:25 for a 09:45 run) are taken from yfinance.
+If the live scan fails, the script falls back to the yfinance scan.
+
 ## Rolling 5-minute tail watch
 
 `python -m app.cli --watch [--live] [--strong]` checks every 5-min candle as it closes,

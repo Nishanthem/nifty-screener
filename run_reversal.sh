@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# 09:30 opening-reversal scan (long-tailed 5m candles + RSI / prev-day level).
-#   - polls live snapshots 09:15-09:30 to rebuild the 09:15/09:20/09:25 candles
-#   - prints the graded scan at 09:30 IST
+# Reversal scan from live NSE data: ./run_reversal.sh [09:30|09:45]
+#   - polls NSE snapshots every 15s through the scan window (the 3 candles before AT)
+#   - at AT prints long-tail 5m candles + prev-close touches/crosses
+#   - falls back to yfinance bars if the live scan fails
 # Requires Chrome running with CDP on localhost:29229 (NSE blocks raw requests).
-# Without Chrome, use the delayed path instead: python3 -m app.cli --reversal
-set -euo pipefail
+set -uo pipefail
 cd "$(dirname "$0")"
+AT="${1:-09:30}"
+UNTIL="$(TZ=Asia/Kolkata date -d "today $AT 15 seconds" +%H:%M:%S)"
 
-echo "polling snapshots until 09:30 IST (first three 5m candles)..."
-while [ "$(TZ=Asia/Kolkata date +%H%M)" -lt 930 ]; do
-  python3 -m app.cli --poll || true
-  sleep 60
+echo "polling NSE snapshots until $UNTIL IST..."
+python3 -m app.cli --poll-until "${UNTIL:0:5}" --every "${POLL_SECS:-15}"
+while [ "$(TZ=Asia/Kolkata date +%H%M%S)" \< "${UNTIL//:/}" ]; do
+  python3 -m app.cli --poll >/dev/null 2>&1 || true
+  sleep 5
 done
 
-python3 -m app.cli --reversal --live
+python3 -m app.cli --reversal --live --at "$AT" || {
+  echo "live scan failed; falling back to yfinance bars"
+  python3 -m app.cli --reversal --at "$AT"
+}
