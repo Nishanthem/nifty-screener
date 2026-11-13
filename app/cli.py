@@ -49,6 +49,8 @@ def main() -> None:
                     help="auto follows the index: longs above VWAP, shorts below")
     ap.add_argument("--reversal", action="store_true",
                     help="09:30 scan for long-tailed 5m reversal candles + RSI/level confirmations")
+    ap.add_argument("--at", default="09:30",
+                    help="with --reversal: scan time; covers the 3 candles before it (09:30, 09:45)")
     ap.add_argument("--watch", action="store_true",
                     help="rolling scan: report each new long-tail 5m candle as it closes, until 15:00")
     ap.add_argument("--strong", action="store_true", help="with --watch: only STRONG tails")
@@ -93,7 +95,8 @@ def main() -> None:
             print(wick_scan.summarize(df).to_string())
             return
         date = pd.Timestamp(args.date, tz="Asia/Kolkata") if args.date else IST.normalize()
-        hits = wick_scan.scan_live(date) if args.live else wick_scan.scan_delayed(date)
+        hits = (wick_scan.scan_live(date, args.at) if args.live
+                else wick_scan.scan_delayed(date, args.at))
         print(wick_scan.report(hits, date, "live snapshots" if args.live else "yfinance 5m, delayed"))
         return
 

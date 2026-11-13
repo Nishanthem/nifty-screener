@@ -93,12 +93,15 @@ def _tail(o: float, h: float, l: float, c: float) -> tuple[str, float] | None:
 
 
 def day_setups(ticker: str, bars: pd.DataFrame, date, rsi_series: pd.Series,
-               slot_vol: pd.Series, prev: dict, decision: str = DECISION) -> list[Setup]:
-    """Setups for one stock-day. `bars` = that day's 5m bars; `prev` = prev day close/high/low."""
+               slot_vol: pd.Series, prev: dict, decision: str = DECISION,
+               start: str = "09:15") -> list[Setup]:
+    """Setups for one stock-day from tail candles in [start, decision).
+    `bars` = that day's 5m bars; `prev` = prev day close/high/low."""
     day = pd.Timestamp(date).strftime("%Y-%m-%d")
     t = bars.index.strftime("%H:%M")
     opening = bars[(t >= "09:15") & (t < decision)]
-    if opening.empty:
+    window = opening[opening.index.strftime("%H:%M") >= start]
+    if window.empty:
         return []
     tp = (opening["High"] + opening["Low"] + opening["Close"]) / 3
     vol = opening["Volume"].replace(0, np.nan)
@@ -108,7 +111,7 @@ def day_setups(ticker: str, bars: pd.DataFrame, date, rsi_series: pd.Series,
     last_close = float(opening["Close"].iloc[-1])
 
     out = []
-    for ts, b in opening.iterrows():
+    for ts, b in window.iterrows():
         hit = _tail(*(float(b[k]) for k in ("Open", "High", "Low", "Close")))
         if hit is None:
             continue
@@ -116,7 +119,7 @@ def day_setups(ticker: str, bars: pd.DataFrame, date, rsi_series: pd.Series,
         bull = side == BULL
         upto = opening.loc[:ts]
         extreme = float(upto["Low"].min() if bull else upto["High"].max())
-        r = rsi_series.reindex(upto.index)
+        r = rsi_series.reindex(window.loc[:ts].index)
         r_ext = float(r.min() if bull else r.max())
         slot = ts.strftime("%H:%M")
         avg = slot_vol.get(slot, np.nan)
@@ -139,10 +142,11 @@ def touches(bar, level: float, tol: float = PC_TOL) -> bool:
     return float(bar["Low"]) <= level * (1 + tol) and float(bar["High"]) >= level * (1 - tol)
 
 
-def first_touch(bars: pd.DataFrame, date, level: float, decision: str = DECISION) -> str | None:
-    """Start time (HH:MM) of the first opening candle before `decision` whose range touched `level`."""
+def first_touch(bars: pd.DataFrame, date, level: float, decision: str = DECISION,
+                start: str = "09:15") -> str | None:
+    """Start time (HH:MM) of the first candle in [start, decision) whose range touched `level`."""
     t = bars.index.strftime("%H:%M")
-    for ts, b in bars[(t >= "09:15") & (t < decision)].iterrows():
+    for ts, b in bars[(t >= start) & (t < decision)].iterrows():
         if touches(b, level):
             return ts.strftime("%H:%M")
     return None
@@ -172,7 +176,7 @@ def _slot_volume(intraday: pd.DataFrame, lookback: int = 10) -> pd.DataFrame:
 
 
 def scan_frame(ticker: str, intraday: pd.DataFrame, dates=None, decision: str = DECISION,
-               official_close: pd.Series | None = None) -> list[Setup]:
+               official_close: pd.Series | None = None, start: str = "09:15") -> list[Setup]:
     """All setups for a stock over `dates` (default: every day in the frame).
 
     `official_close` (date -> exchange close) replaces the last 5m bar's close as
@@ -196,7 +200,7 @@ def scan_frame(ticker: str, intraday: pd.DataFrame, dates=None, decision: str = 
         if p.isna().any():
             continue
         out += day_setups(ticker, bars, d, r, sv.loc[d] if d in sv.index else pd.Series(dtype=float),
-                          p.to_dict(), decision)
+                          p.to_dict(), decision, start)
     return out
 
 

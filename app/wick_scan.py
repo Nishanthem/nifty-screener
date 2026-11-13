@@ -70,33 +70,60 @@ def _prev_close(official: pd.Series, date: pd.Timestamp) -> float | None:
     return float(prior.iloc[-1]) if not prior.empty else None
 
 
+def window_start(decision: str) -> str:
+    """Each scan covers the three 5m candles before `decision` (09:30 -> 09:15, 09:45 -> 09:30)."""
+    return (pd.Timestamp(f"2000-01-01 {decision}") - pd.Timedelta(minutes=15)).strftime("%H:%M")
+
+
 @dataclass
 class ScanResult:
     setups: list[Setup]
-    pc_touches: dict[str, tuple[str, float, float]]  # ticker -> (first candle touching prev close, prev close, gap %)
+    # ticker -> (first candle touching prev close, prev close, open gap %, "crossed up/down" | "touched")
+    pc_touches: dict[str, tuple[str, float, float, str]]
+    start: str = "09:15"
+    decision: str = DECISION
+    missing: list[str] = None  # tickers whose last needed candle wasn't available
+
+
+def _side(px: float, level: float) -> int:
+    return 0 if abs(px - level) <= level * 0.0002 else (1 if px > level else -1)
+
+
+def _pc_cross(day: pd.DataFrame, pc: float, start: str, decision: str) -> str:
+    """Did price end the window on the other side of the previous close than it began?"""
+    t = day.index.strftime("%H:%M")
+    win, before = day[(t >= start) & (t < decision)], day[t < start]
+    ref = float(before["Close"].iloc[-1]) if not before.empty else float(day["Open"].iloc[0])
+    a, b = _side(ref, pc), _side(float(win["Close"].iloc[-1]), pc)
+    if a and b and a != b:
+        return "CROSSED UP" if b > 0 else "CROSSED DOWN"
+    return "touched"
 
 
 def _scan(frames: dict[str, pd.DataFrame], closes: dict[str, float | pd.Series], date: pd.Timestamp,
-          decision: str) -> ScanResult:
-    setups, touches = [], {}
+          decision: str, start: str = "09:15") -> ScanResult:
+    setups, touches, missing = [], {}, []
+    last_slot = (pd.Timestamp(f"2000-01-01 {decision}") - pd.Timedelta(minutes=5)).strftime("%H:%M")
     for t, df in frames.items():
+        day = df[df.index.date == date.date()]
+        if last_slot not in set(day.index.strftime("%H:%M")):
+            missing.append(t)
         c = closes.get(t)
         series = c if isinstance(c, pd.Series) else None
-        setups += scan_frame(t, df, {date.date()}, decision, official_close=series)
+        setups += scan_frame(t, df, {date.date()}, decision, official_close=series, start=start)
         pc = _prev_close(c, date) if series is not None else c
-        if pc:
-            day = df[df.index.date == date.date()]
-            when = first_touch(day, date, pc, decision)
+        if pc and not day.empty:
+            when = first_touch(day, date, pc, decision, start)
             if when:
                 gap = (float(day["Open"].iloc[0]) - pc) / pc * 100
-                touches[t] = (when, round(pc, 2), round(gap, 2))
-    return ScanResult(rank(setups), touches)
+                touches[t] = (when, round(pc, 2), round(gap, 2), _pc_cross(day, pc, start, decision))
+    return ScanResult(rank(setups), touches, start, decision, sorted(missing))
 
 
 def scan_delayed(date: pd.Timestamp, decision: str = DECISION, tickers=NIFTY50) -> ScanResult:
-    """yfinance 5m bars (exchange OHLC, ~15 min delayed; any of the last ~60 days)."""
+    """yfinance 5m bars (exchange OHLC; any of the last ~60 days)."""
     frames = {t: _history(t, date) for t in tickers}
-    return _scan(frames, _official_closes(tickers, date), date, decision)
+    return _scan(frames, _official_closes(tickers, date), date, decision, window_start(decision))
 
 
 def scan_live(date: pd.Timestamp | None = None, decision: str = DECISION, tickers=NIFTY50) -> ScanResult:
@@ -118,13 +145,15 @@ def scan_live(date: pd.Timestamp | None = None, decision: str = DECISION, ticker
         frames[t] = pd.concat([hist[hist.index.date < date.date()], today])
         if t in prev_close:
             closes[t] = pd.Series([prev_close[t]], index=[(date - pd.Timedelta(days=1)).date()])
-    return _scan(frames, closes, date, decision)
+    return _scan(frames, closes, date, decision, window_start(decision))
 
 
 def report(res: ScanResult, date: pd.Timestamp, source: str = "") -> str:
-    head = (f"Opening reversal scan (long-tail 5m candles 09:15-{DECISION}) — {date.date()}"
+    head = (f"Reversal scan (long-tail 5m candles {res.start}-{res.decision}) — {date.date()}"
             f"{f' ({source})' if source else ''}")
     lines = [head]
+    if res.missing:
+        lines.append(f"  WARNING: {len(res.missing)} stocks missing the last candle: {', '.join(res.missing[:10])}")
     if not res.setups:
         lines.append("  no long-tail candles")
     else:
@@ -139,13 +168,18 @@ def report(res: ScanResult, date: pd.Timestamp, source: str = "") -> str:
                          f"{'ok' if s.vwap_ok else '-':>4}  {s.entry}→{s.stop}")
     tails = {s.ticker for s in res.setups}
     lines.append("")
-    lines.append(f"Touched previous day's close 09:15-{DECISION} (gap fills first):")
+    opening = res.start == "09:15"
+    lines.append(f"Touched/crossed previous day's close {res.start}-{res.decision}"
+                 f"{' (gap fills first)' if opening else ' (crosses first)'}:")
     if not res.pc_touches:
         lines.append("  none")
-    order = sorted(res.pc_touches.items(), key=lambda kv: (abs(kv[1][2]) < GAP_FILL_PCT, kv[1][0], kv[0]))
-    for t, (when, pc, gap) in order:
-        kind = "GAP FILL" if abs(gap) >= GAP_FILL_PCT else "opened near it"
-        lines.append(f"  {t:<11} {when}  prev close {pc:<9} open gap {gap:+.2f}%  {kind:<14}"
+    if opening:
+        key = lambda kv: (abs(kv[1][2]) < GAP_FILL_PCT, kv[1][0], kv[0])
+    else:
+        key = lambda kv: (kv[1][3] == "touched", kv[1][0], kv[0])
+    for t, (when, pc, gap, cross) in sorted(res.pc_touches.items(), key=key):
+        kind = ("GAP FILL" if abs(gap) >= GAP_FILL_PCT else "opened near it") if opening else ""
+        lines.append(f"  {t:<11} {when}  prev close {pc:<9} open gap {gap:+.2f}%  {cross:<12} {kind:<14}"
                      f"{'  <- also a long-tail setup' if t in tails else ''}")
     lines.append("")
     lines.append("  A = RSI extreme + prev-day level test, B = one of them, C = tail only. "

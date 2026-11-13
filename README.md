@@ -155,6 +155,12 @@ grade A clearly stays positive. This is a single 59-day window, so paper-trade i
 
 *Not investment advice.*
 
+## 09:45 follow-up scan
+
+`python -m app.cli --reversal --at 09:45` runs the same report for the 09:30/09:35/09:40 candles,
+and lists stocks whose range touched the previous close in that window, marking `CROSSED UP/DOWN`
+when price ended the window on the other side of it.
+
 ## Rolling 5-minute tail watch
 
 `python -m app.cli --watch [--live] [--strong]` checks every 5-min candle as it closes,
