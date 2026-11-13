@@ -10,6 +10,8 @@
     python -m app.cli --reversal             # 09:30 scan: long-tailed 5m reversal candles
     python -m app.cli --reversal --live      # same, from polled live snapshots
     python -m app.cli --reversal --backtest  # grade stats over ~60d of 5m history
+    python -m app.cli --watch [--live] [--strong]  # every 5m candle, all day, as it closes
+    python -m app.cli --watch --backtest     # rolling-scan stats over ~60d
 """
 
 from __future__ import annotations
@@ -47,7 +49,34 @@ def main() -> None:
                     help="auto follows the index: longs above VWAP, shorts below")
     ap.add_argument("--reversal", action="store_true",
                     help="09:30 scan for long-tailed 5m reversal candles + RSI/level confirmations")
+    ap.add_argument("--watch", action="store_true",
+                    help="rolling scan: report each new long-tail 5m candle as it closes, until 15:00")
+    ap.add_argument("--strong", action="store_true", help="with --watch: only STRONG tails")
     args = ap.parse_args()
+
+    if args.watch:
+        from . import rolling
+        if args.backtest:
+            df = rolling.backtest()
+            print(f"{len(df)} tails over {df.date.nunique()} days (enter next candle open, "
+                  f"stop beyond tail, 1.5R, exit 15:15, no costs)\n")
+            print(rolling.summarize(df).to_string())
+            return
+        if args.date:
+            d = pd.Timestamp(args.date, tz="Asia/Kolkata")
+            from .constituents import NIFTY50
+            from .data import YFinanceProvider
+            from .wick_scan import _official_closes
+            closes = _official_closes(NIFTY50, d)
+            p = YFinanceProvider(cache=False)
+            tails = [t for tk in NIFTY50 for t in rolling.scan_frame(
+                tk, p.intraday(tk, days=60, interval="5m"), {d.date()}, closes.get(tk))]
+            for t in sorted(tails, key=lambda x: (x.time, x.ticker)):
+                if t.strong or not args.strong:
+                    print(rolling.fmt(t))
+            return
+        rolling.watch(live=args.live, strong_only=args.strong)
+        return
 
     if args.poll:
         from .nse_live import fetch_snapshots, persist

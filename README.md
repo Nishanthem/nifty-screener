@@ -154,3 +154,26 @@ the prev-day level roughly double the edge. After ~0.05–0.1R of costs only
 grade A clearly stays positive. This is a single 59-day window, so paper-trade it first.
 
 *Not investment advice.*
+
+## Rolling 5-minute tail watch
+
+`python -m app.cli --watch [--live] [--strong]` checks every 5-min candle as it closes,
+09:15-14:55, and prints each new long-tail candle (same tail rule as the 09:30 scan) with tags:
+`day_extreme` (new session high/low), `rsi` (RSI(14) <=35 / >=65), `level` (prev-day low/high),
+`prev_close` (touched yesterday's close). **STRONG** = `rsi`+`level`, or `day_extreme`+`prev_close`.
+`run_watch.sh` runs it all session with live NSE snapshots and logs to `logs/`.
+`--watch --date YYYY-MM-DD` replays a past day; `--watch --backtest` prints the stats below.
+
+Backtest, 59 days of 5m data, all Nifty 50 (enter next candle's open, stop beyond tail, 1.5R, exit 15:15, no costs):
+
+| group | tails | hit % | avg R |
+|---|---|---|---|
+| all | 2187 | 42.6 | +0.04 |
+| STRONG | 765 | 44.7 | +0.11 |
+| 09:15-09:30 all | 931 | 44.1 | +0.09 |
+| 09:15-09:30 STRONG | 448 | 46.7 | +0.16 |
+| after 09:30 all | 1256 | 41.4 | +0.00 |
+| after 09:30 STRONG | 317 | 42.0 | +0.03 |
+
+Tails after 09:30 have essentially no edge, even when STRONG; the 10:00-11:00 hour was negative.
+Treat later alerts as watch-list context rather than trades.
