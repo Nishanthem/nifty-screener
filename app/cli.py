@@ -7,6 +7,9 @@
     python -m app.cli --backtest # validate on ~60d of intraday history
     python -m app.cli --side short   # force shorts (still gated on index below VWAP)
     python -m app.cli --side auto    # default: longs if index > VWAP, shorts if below
+    python -m app.cli --reversal             # 09:30 scan: long-tailed 5m reversal candles
+    python -m app.cli --reversal --live      # same, from polled live snapshots
+    python -m app.cli --reversal --backtest  # grade stats over ~60d of 5m history
 """
 
 from __future__ import annotations
@@ -42,12 +45,27 @@ def main() -> None:
     ap.add_argument("--poll", action="store_true", help="persist a live snapshot and exit")
     ap.add_argument("--side", choices=["auto", LONG, SHORT], default="auto",
                     help="auto follows the index: longs above VWAP, shorts below")
+    ap.add_argument("--reversal", action="store_true",
+                    help="09:30 scan for long-tailed 5m reversal candles + RSI/level confirmations")
     args = ap.parse_args()
 
     if args.poll:
         from .nse_live import fetch_snapshots, persist
         snaps = fetch_snapshots()
         print(f"saved {len(snaps)} snapshots -> {persist(snaps)}")
+        return
+
+    if args.reversal:
+        from . import wick_scan
+        if args.backtest:
+            df = wick_scan.backtest()
+            print(f"{len(df)} setups over {df.date.nunique()} days "
+                  f"(enter 09:30, stop beyond tail, 1.5R target, exit 15:15, no costs)\n")
+            print(wick_scan.summarize(df).to_string())
+            return
+        date = pd.Timestamp(args.date, tz="Asia/Kolkata") if args.date else IST.normalize()
+        hits = wick_scan.scan_live(date) if args.live else wick_scan.scan_delayed(date)
+        print(wick_scan.report(hits, date, "live snapshots" if args.live else "yfinance 5m, delayed"))
         return
 
     if args.live:

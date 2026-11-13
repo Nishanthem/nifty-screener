@@ -49,6 +49,14 @@ def today(top: int = 5, time: str = "10:00", side: str = "auto"):
     return PAGE.replace("{{body}}", body)
 
 
+@app.get("/reversals", response_class=HTMLResponse)
+def reversals(date: str | None = None):
+    from .wick_scan import scan_delayed, report
+    d = pd.Timestamp(date, tz="Asia/Kolkata") if date else pd.Timestamp.now(tz="Asia/Kolkata").normalize()
+    body = f"<h1>Opening reversals — {d.date()}</h1><pre>{report(scan_delayed(d), d, 'delayed')}</pre>"
+    return PAGE.replace("{{body}}", body)
+
+
 @app.get("/backtest")
 def bt(side: str = LONG):
     index_bars = _provider.index_intraday()
