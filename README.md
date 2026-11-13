@@ -21,6 +21,12 @@ python -m app.cli                  # delayed yfinance path
 python -m app.cli --date 2026-09-11
 python -m app.cli --backtest       # validate logic on ~60d of 15m history
 
+python -m app.cli --reversal                  # 09:30 reversal scan (delayed yfinance 5m)
+python -m app.cli --reversal --date 2026-11-12
+python -m app.cli --reversal --live           # from polled live snapshots
+./run_reversal.sh                             # poll 09:15-09:30, scan at 09:30
+python -m app.cli --reversal --backtest       # grade stats over ~60d of 5m history
+
 uvicorn app.web:app --port 8123    # web UI at http://localhost:8123
 ```
 
@@ -29,6 +35,7 @@ Cron (IST server), polling the opening range then picking at 10:00:
 ```
 15-59 9  * * 1-5 cd /path/to/nifty-screener && python3 -m app.cli --poll
 0     10 * * 1-5 cd /path/to/nifty-screener && python3 -m app.cli --live --top 3
+30    9  * * 1-5 cd /path/to/nifty-screener && python3 -m app.cli --reversal --live
 ```
 
 ## Live data notes
@@ -100,4 +107,79 @@ noise hasn't resolved by 9:45, and a 5-min range whipsaws.
 brokerage/slippage (~0.05–0.1R/trade). Promising, not proven —
 paper-trade it before sizing.
 
+## Opening reversal scan (09:30, 5m long tails)
+
+At 09:30 the 09:15/09:20/09:25 five-minute candles are complete. Any Nifty 50
+stock whose candle has a long tail (wick ≥ 2× body, ≥ 50% of range, ≥ 0.25%
+of price) is a reversal candidate: lower tail → BUY, upper tail → SELL.
+Each one is checked against:
+
+| confirmation | rule | kept? |
+|---|---|---|
+| RSI(14) on 5m | ≤ 35 (bull) / ≥ 65 (bear) at the tail | **yes**: helped in both halves of the window |
+| prev-day level | tail tested the previous day's low (bull) / high (bear) | **yes** |
+| against the move | tail opposes a ≥ 0.3% move from prev close | shown only, small effect |
+| VWAP | 09:25 close back on the reversal side of VWAP | shown only, mixed |
+| relative volume | tail candle volume vs. 10-day average for that 5m slot | shown only, didn't help; yfinance often reports 0 volume for 09:15 |
+
+Grade **A** = RSI + level, **B** = one of them, **C** = tail only. The scan
+lists every tail, C included. Setups where price at 09:30 has already moved
+past the tail's extreme are dropped.
+
+**Previous close**: the `prevC` column marks tails whose candle touched the
+previous day's official close. A second list shows every Nifty 50 stock that
+touched its previous close between 09:15 and 09:30. **GAP FILL** stocks (opened
+≥ 0.3% away, then came back) are listed first, before stocks that simply
+opened near the previous close. The previous close is the unadjusted exchange
+close (yfinance daily, or NSE's `previousClose` on the live path).
+Trade model: enter at 09:30, stop just beyond the tail's extreme, 1.5R
+target, square off 15:15.
+
+Backtest (`--reversal --backtest`, 59 days of yfinance 5m to 12 Nov 2026,
+one setup per stock-day, no costs):
+
+| group | setups | hit | avg R | EOD move |
+|---|---|---|---|---|
+| all tails | 811 | 47.7% | +0.11R | +0.17% |
+| **grade A** | 204 | 52.5% | **+0.23R** | +0.35% |
+| grade B | 207 | 47.8% | +0.15R | +0.25% |
+| grade C | 400 | 45.2% | +0.03R | +0.04% |
+| control: fade every opening move, no tail filter | 2991 | 42.6% | +0.03R | +0.03% |
+| tail touched prev close | 250 | 46.8% | +0.10R | +0.22% |
+| tail not at prev close | 561 | 48.1% | +0.11R | +0.15% |
+
+Touching the previous close is neutral on its own, so it's reported but doesn't
+change the grade. Tails do carry information compared with blindly fading the open, and RSI plus
+the prev-day level roughly double the edge. After ~0.05–0.1R of costs only
+grade A clearly stays positive. This is a single 59-day window, so paper-trade it first.
+
 *Not investment advice.*
+
+## 09:45 follow-up scan
+
+`python -m app.cli --reversal --at 09:45` runs the same report for the 09:30/09:35/09:40 candles,
+and lists stocks whose range touched the previous close in that window, marking `CROSSED UP/DOWN`
+when price ended the window on the other side of it.
+
+## Rolling 5-minute tail watch
+
+`python -m app.cli --watch [--live] [--strong]` checks every 5-min candle as it closes,
+09:15-14:55, and prints each new long-tail candle (same tail rule as the 09:30 scan) with tags:
+`day_extreme` (new session high/low), `rsi` (RSI(14) <=35 / >=65), `level` (prev-day low/high),
+`prev_close` (touched yesterday's close). **STRONG** = `rsi`+`level`, or `day_extreme`+`prev_close`.
+`run_watch.sh` runs it all session with live NSE snapshots and logs to `logs/`.
+`--watch --date YYYY-MM-DD` replays a past day; `--watch --backtest` prints the stats below.
+
+Backtest, 59 days of 5m data, all Nifty 50 (enter next candle's open, stop beyond tail, 1.5R, exit 15:15, no costs):
+
+| group | tails | hit % | avg R |
+|---|---|---|---|
+| all | 2187 | 42.6 | +0.04 |
+| STRONG | 765 | 44.7 | +0.11 |
+| 09:15-09:30 all | 931 | 44.1 | +0.09 |
+| 09:15-09:30 STRONG | 448 | 46.7 | +0.16 |
+| after 09:30 all | 1256 | 41.4 | +0.00 |
+| after 09:30 STRONG | 317 | 42.0 | +0.03 |
+
+Tails after 09:30 have essentially no edge, even when STRONG; the 10:00-11:00 hour was negative.
+Treat later alerts as watch-list context rather than trades.
